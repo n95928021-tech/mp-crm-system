@@ -1,0 +1,243 @@
+// ══════════════════════════════════════════════
+// MP CRM — Prisma Database Schema
+// ══════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Пользователи (менеджеры) ───
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  password     String
+  firstName    String   @map("first_name")
+  lastName     String   @map("last_name")
+  avatar       String?
+  role         Role     @default(MANAGER)
+  isActive     Boolean  @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Связи
+  cabinetAccess  UserCabinet[]
+  tasks          Task[]
+  chatMessages   ChatMessage[]    @relation("SentMessages")
+  assignedChats  Chat[]           @relation("AssignedManager")
+  notifications  Notification[]
+  refreshTokens  RefreshToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  VIEWER
+}
+
+// ─── Маркетплейсы ───
+model Marketplace {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  slug      String   @unique  // wb, ozon, yandex
+  color     String   @default("#6366f1")
+  icon      String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  cabinets Cabinet[]
+
+  @@map("marketplaces")
+}
+
+// ─── Кабинеты (магазины) ───
+model Cabinet {
+  id              String   @id @default(uuid())
+  name            String
+  marketplaceId   String   @map("marketplace_id")
+  apiToken        String?  @map("api_token")
+  apiClientId     String?  @map("api_client_id")
+  apiKey          String?  @map("api_key")
+  campaignId      String?  @map("campaign_id")
+  isActive        Boolean  @default(true) @map("is_active")
+  lastSyncAt      DateTime? @map("last_sync_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Связи
+  marketplace    Marketplace     @relation(fields: [marketplaceId], references: [id])
+  userAccess     UserCabinet[]
+  chats          Chat[]
+  tasks          Task[]
+
+  @@map("cabinets")
+}
+
+// ─── Связь пользователь ↔ кабинет ───
+model UserCabinet {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  cabinetId String   @map("cabinet_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cabinet Cabinet @relation(fields: [cabinetId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, cabinetId])
+  @@map("user_cabinets")
+}
+
+// ─── Чаты с покупателями ───
+model Chat {
+  id                 String     @id @default(uuid())
+  cabinetId          String     @map("cabinet_id")
+  externalChatId     String?    @map("external_chat_id")  // ID чата на маркетплейсе
+  customerName       String     @map("customer_name")
+  customerExternalId String?    @map("customer_external_id")
+  status             ChatStatus @default(OPEN)
+  assignedManagerId  String?    @map("assigned_manager_id")
+  lastMessageAt      DateTime?  @map("last_message_at")
+  lastMessageText    String?    @map("last_message_text")
+  unreadCount        Int        @default(0) @map("unread_count")
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
+
+  // Связи
+  cabinet         Cabinet       @relation(fields: [cabinetId], references: [id])
+  assignedManager User?         @relation("AssignedManager", fields: [assignedManagerId], references: [id])
+  messages        ChatMessage[]
+
+  @@index([cabinetId, lastMessageAt])
+  @@index([assignedManagerId])
+  @@map("chats")
+}
+
+enum ChatStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+// ─── Сообщения в чате ───
+model ChatMessage {
+  id             String      @id @default(uuid())
+  chatId         String      @map("chat_id")
+  senderType     SenderType  @map("sender_type")
+  senderId       String?     @map("sender_id")  // userId если от менеджера
+  text           String
+  externalMsgId  String?     @map("external_msg_id")
+  isRead         Boolean     @default(false) @map("is_read")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  // Связи
+  chat   Chat  @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  sender User? @relation("SentMessages", fields: [senderId], references: [id])
+
+  @@index([chatId, createdAt])
+  @@map("chat_messages")
+}
+
+enum SenderType {
+  CUSTOMER
+  MANAGER
+  SYSTEM
+}
+
+// ─── Задачи / напоминания ───
+model Task {
+  id          String       @id @default(uuid())
+  title       String
+  description String?
+  userId      String       @map("user_id")
+  cabinetId   String?      @map("cabinet_id")
+  priority    TaskPriority @default(MEDIUM)
+  status      TaskStatus   @default(TODO)
+  dueDate     DateTime     @map("due_date")
+  completedAt DateTime?    @map("completed_at")
+  isOverdue   Boolean      @default(false) @map("is_overdue")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  // Связи
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cabinet Cabinet? @relation(fields: [cabinetId], references: [id])
+
+  @@index([userId, dueDate])
+  @@index([status, dueDate])
+  @@map("tasks")
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+// ─── Уведомления ───
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String           @map("user_id")
+  type      NotificationType
+  title     String
+  body      String?
+  data      Json?            // Доп. данные (chatId, taskId и т.д.)
+  isRead    Boolean          @default(false) @map("is_read")
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  NEW_MESSAGE
+  TASK_REMINDER
+  TASK_OVERDUE
+  SYSTEM
+}
+
+// ─── Аналитика (агрегированные данные) ───
+model AnalyticsSnapshot {
+  id              String   @id @default(uuid())
+  cabinetId       String   @map("cabinet_id")
+  date            DateTime @db.Date
+  totalChats      Int      @default(0) @map("total_chats")
+  avgResponseSec  Float    @default(0) @map("avg_response_sec")
+  maxResponseSec  Float    @default(0) @map("max_response_sec")
+  minResponseSec  Float    @default(0) @map("min_response_sec")
+  totalMessages   Int      @default(0) @map("total_messages")
+  resolvedChats   Int      @default(0) @map("resolved_chats")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([cabinetId, date])
+  @@map("analytics_snapshots")
+}
