@@ -1571,7 +1571,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                           ID: {cab.id}
                         </div>
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <span style={{
                           fontSize: 10, padding: "2px 8px", borderRadius: 5, fontWeight: 600,
                           background: cab.chatCount > 0 ? "rgba(34,197,94,0.12)" : "rgba(255,255,255,0.04)",
