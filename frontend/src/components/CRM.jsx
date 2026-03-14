@@ -291,7 +291,7 @@ const TimerBadge = ({ lastMessageTime }) => {
 };
 
 // ─── Main App ───
-export default function MarketplaceCRM() {
+export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [chats, setChats] = useState(() => generateChats());
   const [tasks, setTasks] = useState(() => generateTasks());
   const [activeView, setActiveView] = useState("chats");
@@ -1137,7 +1137,7 @@ export default function MarketplaceCRM() {
           ))}
         </div>
 
-        {/* Sound toggle */}
+        {/* Sound toggle & User */}
         <div style={{ marginTop: "auto", padding: 16, borderTop: "1px solid rgba(255,255,255,0.06)" }}>
           <button
             style={{
@@ -1159,6 +1159,39 @@ export default function MarketplaceCRM() {
               }}
             />
           </button>
+          {user && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", marginTop: 8 }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: 8,
+                background: "linear-gradient(135deg, #a855f730, #a855f710)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "#a855f7", fontSize: 12, fontWeight: 700,
+              }}>
+                {user.firstName?.[0] || "U"}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: "#e2e8f0" }}>
+                  {user.firstName} {user.lastName}
+                </div>
+                <div style={{ fontSize: 10, color: "#64748b" }}>{user.role}</div>
+              </div>
+            </div>
+          )}
+          {onLogout && (
+            <button
+              style={{
+                ...S.navBtn(false),
+                fontSize: 12,
+                gap: 8,
+                color: "#ef4444",
+                marginTop: 4,
+              }}
+              onClick={onLogout}
+            >
+              {Icons.x()}
+              <span>Выйти</span>
+            </button>
+          )}
         </div>
       </div>
 
