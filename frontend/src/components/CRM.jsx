@@ -306,6 +306,35 @@ const TimerBar = ({ lastMessageTime }) => {
   );
 };
 
+// ─── Фоновый таймер на всю высоту окна чата ───
+const ChatTimerBg = ({ lastMessageTime }) => {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const update = () => setElapsed(Math.floor((Date.now() - new Date(lastMessageTime).getTime()) / 1000));
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [lastMessageTime]);
+
+  const minutes = elapsed / 60;
+  let color;
+  if (minutes < 2) color = "34,197,94";       // green
+  else if (minutes < 6) color = "234,179,8";   // yellow
+  else color = "239,68,68";                     // red
+
+  // Прозрачность: сильнее при большем времени, но всегда видно контент
+  const opacity = minutes < 2 ? 0.04 : minutes < 6 ? 0.06 : 0.08;
+
+  return (
+    <div style={{
+      position: "absolute", inset: 0, zIndex: 0, pointerEvents: "none",
+      background: `linear-gradient(180deg, rgba(${color},${opacity}) 0%, rgba(${color},${opacity * 0.3}) 100%)`,
+      transition: "background 2s ease",
+    }} />
+  );
+};
+
 // Компактный таймер-бейдж для хедера чата
 const TimerBadge = ({ lastMessageTime }) => {
   const [elapsed, setElapsed] = useState(0);
@@ -549,16 +578,18 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         headers: getHeaders(),
         body: JSON.stringify({
           title: chatTask.title,
-          description: `Чат: ${currentChat.customerName} (${getCabinet(currentChat.cabinetId)?.name || ""})`,
+          description: `Чат: ${currentChat.customerName} (${getCabinet(currentChat.cabinetId)?.name || currentChat.cabinetId || ""})`,
           dueDate: `${chatTask.date}T${chatTask.time}:00`,
           priority: chatTask.priority.toUpperCase(),
-          cabinetId: currentChat.cabinetId || null,
         }),
       });
       if (res.ok) {
         await loadTasks();
         setChatTask({ title: "", date: "", time: "10:00", priority: "medium" });
         setShowChatTaskModal(false);
+      } else {
+        const err = await res.json();
+        console.error("Ошибка создания задачи:", err);
       }
     } catch (e) {
       console.error("Ошибка создания задачи из чата:", e);
@@ -1592,7 +1623,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   </div>
                 )}
 
-                <div style={{ flex: 1, overflow: "auto", padding: "20px 24px" }}>
+                <div style={{ flex: 1, overflow: "auto", padding: "20px 24px", position: "relative" }}>
+                  {/* Фоновая полоска таймера на всю высоту чата */}
+                  <ChatTimerBg lastMessageTime={currentChat.lastMessageTime} />
                   {currentChat.messages.map((msg, i) => (
                     <div
                       key={msg.id}
@@ -1601,6 +1634,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                         justifyContent: msg.from === "manager" ? "flex-end" : "flex-start",
                         marginBottom: 12,
                         animation: "slideIn 0.2s ease",
+                        position: "relative", zIndex: 1,
                       }}
                     >
                       <div
