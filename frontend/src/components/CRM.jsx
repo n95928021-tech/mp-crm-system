@@ -113,135 +113,11 @@ const Icons = {
 };
 
 // ─── Data ───
-const MARKETPLACES = [
-  {
-    id: "wb",
-    name: "Wildberries",
-    icon: Icons.wb,
-    color: "#a855f7",
-    cabinets: [
-      { id: "wb1", name: "WB Основной" },
-      { id: "wb2", name: "WB Одежда" },
-      { id: "wb3", name: "WB Электроника" },
-      { id: "wb4", name: "WB Косметика" },
-      { id: "wb5", name: "WB Дом и сад" },
-    ],
-  },
-  {
-    id: "ozon",
-    name: "Ozon",
-    icon: Icons.ozon,
-    color: "#3b82f6",
-    cabinets: [
-      { id: "oz1", name: "Ozon Основной" },
-      { id: "oz2", name: "Ozon Premium" },
-      { id: "oz3", name: "Ozon Склад МСК" },
-      { id: "oz4", name: "Ozon Склад СПБ" },
-    ],
-  },
-  {
-    id: "yandex",
-    name: "Яндекс Маркет",
-    icon: Icons.yandex,
-    color: "#f59e0b",
-    cabinets: [{ id: "ym1", name: "ЯМ Основной" }],
-  },
-];
+// MARKETPLACES загружается из API — см. loadMarketplaces() в компоненте
+const MP_ICONS = { wb: Icons.wb, ozon: Icons.ozon, yandex: Icons.yandex };
+const MP_COLORS = { wb: "#a855f7", ozon: "#3b82f6", yandex: "#f59e0b" };
 
-const NAMES = [
-  "Алексей", "Мария", "Дмитрий", "Елена", "Сергей", "Анна",
-  "Иван", "Ольга", "Павел", "Наталья", "Артём", "Юлия",
-];
-const MSGS = [
-  "Здравствуйте! Подскажите по заказу",
-  "Когда будет доставка?",
-  "Хочу оформить возврат",
-  "Товар не соответствует описанию",
-  "Спасибо за быструю доставку!",
-  "Можно ли изменить адрес?",
-  "Есть ли скидка на повторный заказ?",
-  "Проблема с оплатой",
-  "Товар пришёл повреждённый",
-  "Отличное качество, спасибо!",
-];
-
-const generateChats = () => {
-  const chats = [];
-  MARKETPLACES.forEach((mp) => {
-    mp.cabinets.forEach((cab) => {
-      const count = 3 + Math.floor(Math.random() * 5);
-      for (let i = 0; i < count; i++) {
-        const name = NAMES[Math.floor(Math.random() * NAMES.length)];
-        const minAgo = Math.floor(Math.random() * 15);
-        const lastMsg = new Date(Date.now() - minAgo * 60000);
-        const responseTime = Math.floor(Math.random() * 600);
-        chats.push({
-          id: `${cab.id}-chat-${i}`,
-          cabinetId: cab.id,
-          marketplaceId: mp.id,
-          customerName: name,
-          lastMessage: MSGS[Math.floor(Math.random() * MSGS.length)],
-          lastMessageTime: lastMsg,
-          unread: Math.random() > 0.5 ? Math.floor(Math.random() * 5) + 1 : 0,
-          responseTimeSec: responseTime,
-          messages: [
-            {
-              id: 1,
-              from: "customer",
-              text: MSGS[Math.floor(Math.random() * MSGS.length)],
-              time: new Date(lastMsg - 300000),
-            },
-            {
-              id: 2,
-              from: "manager",
-              text: "Добрый день! Сейчас проверю информацию.",
-              time: new Date(lastMsg - 180000),
-            },
-            {
-              id: 3,
-              from: "customer",
-              text: MSGS[Math.floor(Math.random() * MSGS.length)],
-              time: lastMsg,
-            },
-          ],
-        });
-      }
-    });
-  });
-  return chats;
-};
-
-const generateTasks = () => {
-  const tasks = [];
-  const titles = [
-    "Обновить карточки товаров",
-    "Загрузить новые фото",
-    "Ответить на отзывы",
-    "Проверить остатки",
-    "Настроить рекламу",
-    "Подготовить акцию",
-    "Обновить цены",
-    "Проверить возвраты",
-    "Собрать аналитику",
-    "Оформить поставку",
-  ];
-  for (let i = 0; i < 12; i++) {
-    const d = new Date();
-    d.setDate(d.getDate() + Math.floor(Math.random() * 14) - 3);
-    d.setHours(9 + Math.floor(Math.random() * 9), Math.floor(Math.random() * 4) * 15);
-    const overdue = d < new Date() && Math.random() > 0.4;
-    tasks.push({
-      id: `task-${i}`,
-      title: titles[i % titles.length],
-      date: d,
-      completed: Math.random() > 0.7,
-      overdue: overdue && !Math.random() > 0.7,
-      cabinetId: MARKETPLACES[Math.floor(Math.random() * 3)].cabinets[0].id,
-      priority: ["low", "medium", "high"][Math.floor(Math.random() * 3)],
-    });
-  }
-  return tasks;
-};
+// Все данные грузятся из API
 
 // ─── Timer Progress Bar Component ───
 const TimerBar = ({ lastMessageTime }) => {
@@ -481,6 +357,7 @@ const TimerBadge = ({ lastMessageTime }) => {
 
 // ─── Main App ───
 export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
+  const [marketplaces, setMarketplaces] = useState([]);
   const [chats, setChats] = useState([]);
   const [chatsLoading, setChatsLoading] = useState(true);
   const [tasks, setTasks] = useState([]);
@@ -502,6 +379,32 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [realAnalytics, setRealAnalytics] = useState(null);
   const chatEndRef = useRef(null);
   const [now, setNow] = useState(new Date());
+
+  // ─── Загрузка маркетплейсов и кабинетов из API ───
+  const loadMarketplaces = useCallback(async () => {
+    if (!apiUrl) return;
+    try {
+      const res = await fetch(`${apiUrl}/marketplaces`, { headers: getHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const mapped = (data.data || []).map((mp) => ({
+          id: mp.slug,                    // "wb" / "ozon" / "yandex"
+          dbId: mp.id,                    // UUID в БД
+          name: mp.name,
+          icon: MP_ICONS[mp.slug] || Icons.wb,
+          color: mp.color || MP_COLORS[mp.slug] || "#6366f1",
+          cabinets: (mp.cabinets || []).map((c) => ({
+            id: c.id,                     // UUID кабинета — используем как cabinetId
+            name: c.name,
+            chatCount: c._count?.chats || 0,
+          })),
+        }));
+        setMarketplaces(mapped);
+      }
+    } catch (e) {
+      console.error("Ошибка загрузки маркетплейсов:", e);
+    }
+  }, [apiUrl]);
 
   // ─── Загрузка чатов из API ───
   const loadChats = useCallback(async () => {
@@ -612,6 +515,11 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // ─── Загрузка маркетплейсов один раз при старте ───
+  useEffect(() => {
+    loadMarketplaces();
+  }, [loadMarketplaces]);
 
   // ─── Загрузка чатов при смене фильтра ───
   useEffect(() => {
@@ -804,9 +712,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     [chats, selectedChat]
   );
 
-  const getMarketplace = (id) => MARKETPLACES.find((m) => m.id === id);
+  const getMarketplace = (id) => marketplaces.find((m) => m.id === id);
   const getCabinet = (id) => {
-    for (const mp of MARKETPLACES) {
+    for (const mp of marketplaces) {
       const cab = mp.cabinets.find((c) => c.id === id);
       if (cab) return cab;
     }
@@ -834,7 +742,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     // Fallback на демо-данные из чатов
     const byMarketplace = {};
     const byCabinet = {};
-    MARKETPLACES.forEach((mp) => {
+    marketplaces.forEach((mp) => {
       const mpChats = chats.filter((c) => c.marketplaceId === mp.id);
       const avg = mpChats.length
         ? mpChats.reduce((s, c) => s + c.responseTimeSec, 0) / mpChats.length
@@ -1438,7 +1346,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           </h3>
           {Object.entries(analyticsData.byCabinet).map(([id, data]) => {
             const pct = (data.avg / maxAvg) * 100;
-            const mp = MARKETPLACES.find((m) => m.cabinets.some((c) => c.id === id));
+            const mp = marketplaces.find((m) => m.cabinets.some((c) => c.id === id));
             const color = mp?.color || "#a855f7";
             return (
               <div key={id} style={{ marginBottom: 14 }}>
@@ -1551,7 +1459,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           >
             Все кабинеты
           </button>
-          {MARKETPLACES.map((mp) => (
+          {marketplaces.map((mp) => (
             <div key={mp.id}>
               <button
                 style={S.mpItem(selectedMarketplace === mp.id && !selectedCabinet, mp.color)}
@@ -1572,6 +1480,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     key={cab.id}
                     style={S.cabItem(selectedCabinet === cab.id)}
                     onClick={() => setSelectedCabinet(cab.id)}
+                    title={`ID: ${cab.id}`}
                   >
                     <span
                       style={{
@@ -1582,7 +1491,14 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                         flexShrink: 0,
                       }}
                     />
-                    {cab.name}
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {cab.name}
+                      </span>
+                      <span style={{ display: "block", fontSize: 9, color: "#334155", fontFamily: "'JetBrains Mono', monospace", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {cab.id.slice(0, 8)}…
+                      </span>
+                    </span>
                   </button>
                 ))}
             </div>
