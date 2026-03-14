@@ -54,7 +54,6 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./backend/src:/app/src
       - ./backend/prisma:/app/prisma
     restart: on-failure
 
