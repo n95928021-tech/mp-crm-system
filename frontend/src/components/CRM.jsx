@@ -306,7 +306,7 @@ const TimerBar = ({ lastMessageTime }) => {
   );
 };
 
-// ─── Карточка чата с фоновым таймером на всю высоту ───
+// ─── Карточка чата с градиентной полоской-таймером справа ───
 const ChatItemWithTimer = ({ chat, mp, active, onClick, getCabinet, badge }) => {
   const [elapsed, setElapsed] = useState(0);
 
@@ -318,67 +318,92 @@ const ChatItemWithTimer = ({ chat, mp, active, onClick, getCabinet, badge }) => 
   }, [chat.lastMessageTime]);
 
   const minutes = elapsed / 60;
-  let timerColor, timerRgb;
-  if (minutes < 2) { timerColor = "#22c55e"; timerRgb = "34,197,94"; }
-  else if (minutes < 6) { timerColor = "#eab308"; timerRgb = "234,179,8"; }
-  else { timerColor = "#ef4444"; timerRgb = "239,68,68"; }
+
+  // Градиент полоски: зелёный / жёлтый / красный (как на макете)
+  let stripGradient;
+  if (minutes < 2) {
+    stripGradient = "linear-gradient(180deg, #16a34a 0%, #22c55e 50%, #4ade80 100%)";
+  } else if (minutes < 6) {
+    stripGradient = "linear-gradient(180deg, #d97706 0%, #f59e0b 50%, #fbbf24 100%)";
+  } else {
+    stripGradient = "linear-gradient(180deg, #b91c1c 0%, #ef4444 50%, #f87171 100%)";
+  }
 
   const m = Math.floor(elapsed / 60);
   const s = elapsed % 60;
+  const timeStr = `${m}:${s.toString().padStart(2, "0")}`;
 
   return (
     <div
       onClick={onClick}
       style={{
-        position: "relative", overflow: "hidden",
-        display: "flex", gap: 12, padding: "12px 16px",
+        display: "flex", alignItems: "stretch",
         cursor: "pointer",
         background: active ? "rgba(255,255,255,0.05)" : "transparent",
         borderBottom: "1px solid rgba(255,255,255,0.03)",
         borderLeft: active ? "3px solid #a855f7" : "3px solid transparent",
         transition: "background 0.15s",
+        minHeight: 70,
+        overflow: "hidden",
       }}
     >
-      {/* Фоновая заливка таймера на всю высоту */}
-      <div style={{
-        position: "absolute", inset: 0, zIndex: 0, pointerEvents: "none",
-        background: `linear-gradient(90deg, rgba(${timerRgb},0.08) 0%, rgba(${timerRgb},0.02) 100%)`,
-        borderRight: `3px solid ${timerColor}`,
-        transition: "background 1s, border-color 1s",
-      }} />
-      {/* Аватар */}
-      <div style={{
-        width: 40, height: 40, borderRadius: 10,
-        background: `linear-gradient(135deg, ${mp.color}30, ${mp.color}10)`,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        color: mp.color, fontSize: 15, fontWeight: 700, flexShrink: 0,
-        position: "relative", zIndex: 1,
-      }}>
-        {chat.customerName[0]}
-      </div>
-      {/* Контент */}
-      <div style={{ flex: 1, minWidth: 0, position: "relative", zIndex: 1 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>
-            {chat.customerName}
-          </span>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{
-              fontSize: 10, fontWeight: 600, color: timerColor,
-              fontFamily: "'JetBrains Mono', monospace",
-            }}>
-              {m}:{s.toString().padStart(2, "0")}
+      {/* Левая часть — аватар + контент */}
+      <div style={{ display: "flex", gap: 12, padding: "12px 8px 12px 14px", flex: 1, minWidth: 0 }}>
+        {/* Аватар */}
+        <div style={{
+          width: 40, height: 40, borderRadius: 10,
+          background: `linear-gradient(135deg, ${mp.color}30, ${mp.color}10)`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: mp.color, fontSize: 15, fontWeight: 700, flexShrink: 0, alignSelf: "center",
+        }}>
+          {chat.customerName[0]}
+        </div>
+        {/* Контент */}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {chat.customerName}
             </span>
             {chat.unread > 0 && <span style={badge(mp.color)}>{chat.unread}</span>}
           </div>
+          <div style={{ fontSize: 11, color: "#64748b", marginBottom: 3, display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: mp.color, flexShrink: 0 }} />
+            {getCabinet(chat.cabinetId)?.name}
+          </div>
+          <div style={{ fontSize: 12, color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {chat.lastMessage}
+          </div>
         </div>
-        <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4, display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: mp.color, flexShrink: 0 }} />
-          {getCabinet(chat.cabinetId)?.name}
-        </div>
-        <div style={{ fontSize: 12, color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {chat.lastMessage}
-        </div>
+      </div>
+
+      {/* Правая часть — градиентная полоска таймера на всю высоту */}
+      <div style={{
+        width: 62,
+        flexShrink: 0,
+        background: stripGradient,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        position: "relative",
+        transition: "background 1.5s ease",
+      }}>
+        {/* Затемнение слева для плавного перехода */}
+        <div style={{
+          position: "absolute", inset: 0,
+          background: "linear-gradient(90deg, rgba(0,0,0,0.35) 0%, rgba(0,0,0,0.0) 60%)",
+          pointerEvents: "none",
+        }} />
+        {/* Время крупно поверх полоски */}
+        <span style={{
+          position: "relative", zIndex: 1,
+          fontSize: 14, fontWeight: 800,
+          color: "#fff",
+          fontFamily: "'JetBrains Mono', monospace",
+          textShadow: "0 1px 6px rgba(0,0,0,0.7)",
+          letterSpacing: "-0.5px",
+        }}>
+          {timeStr}
+        </span>
       </div>
     </div>
   );
@@ -1045,7 +1070,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   return (
                     <div
                       key={task.id}
-                      onClick={() => toggleTask(task.id)}
+                      onClick={() => setSelectedTaskDetail(task)}
                       style={{
                         fontSize: 10,
                         padding: "3px 6px",
