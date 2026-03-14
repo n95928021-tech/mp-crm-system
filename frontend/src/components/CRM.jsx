@@ -242,12 +242,76 @@ const generateTasks = () => {
   return tasks;
 };
 
-// ─── Timer Badge Component ───
+// ─── Timer Progress Bar Component ───
+const TimerBar = ({ lastMessageTime }) => {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const update = () => setElapsed(Math.floor((Date.now() - new Date(lastMessageTime).getTime()) / 1000));
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [lastMessageTime]);
+
+  const minutes = elapsed / 60;
+  let color, phase;
+  if (minutes < 2) {
+    color = "#22c55e";
+    phase = "green";
+  } else if (minutes < 6) {
+    color = "#eab308";
+    phase = "yellow";
+  } else {
+    color = "#ef4444";
+    phase = "red";
+  }
+
+  // Процент заполнения: green 0-2мин (100%→0%), yellow 2-6мин (100%→0%), red всегда 100%
+  let pct;
+  if (phase === "green") {
+    pct = Math.max(0, 100 - (minutes / 2) * 100);
+  } else if (phase === "yellow") {
+    pct = Math.max(0, 100 - ((minutes - 2) / 4) * 100);
+  } else {
+    pct = 100;
+  }
+
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+
+  return (
+    <div style={{ position: "relative", width: "100%" }}>
+      {/* Время */}
+      <span style={{
+        position: "absolute", right: 0, top: -18, zIndex: 2,
+        fontSize: 10, fontWeight: 600, color,
+        fontFamily: "'JetBrains Mono', monospace",
+      }}>
+        {m}:{s.toString().padStart(2, "0")}
+      </span>
+      {/* Полоска фон */}
+      <div style={{
+        width: "100%", height: 3, borderRadius: 2,
+        background: "rgba(255,255,255,0.06)",
+        overflow: "hidden",
+      }}>
+        {/* Полоска заполненная */}
+        <div style={{
+          width: `${pct}%`, height: "100%", borderRadius: 2,
+          background: color,
+          transition: "width 1s linear, background 0.3s",
+        }} />
+      </div>
+    </div>
+  );
+};
+
+// Компактный таймер-бейдж для хедера чата
 const TimerBadge = ({ lastMessageTime }) => {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    const update = () => setElapsed(Math.floor((Date.now() - lastMessageTime.getTime()) / 1000));
+    const update = () => setElapsed(Math.floor((Date.now() - new Date(lastMessageTime).getTime()) / 1000));
     update();
     const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
@@ -258,7 +322,7 @@ const TimerBadge = ({ lastMessageTime }) => {
   if (minutes < 2) {
     color = "#22c55e";
     bg = "rgba(34,197,94,0.12)";
-  } else if (minutes < 5) {
+  } else if (minutes < 6) {
     color = "#eab308";
     bg = "rgba(234,179,8,0.12)";
   } else {
@@ -270,20 +334,12 @@ const TimerBadge = ({ lastMessageTime }) => {
   const s = elapsed % 60;
 
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 4,
-        fontSize: 11,
-        fontWeight: 600,
-        color,
-        background: bg,
-        padding: "2px 7px",
-        borderRadius: 6,
-        fontFamily: "'JetBrains Mono', monospace",
-      }}
-    >
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 4,
+      fontSize: 11, fontWeight: 600, color, background: bg,
+      padding: "2px 7px", borderRadius: 6,
+      fontFamily: "'JetBrains Mono', monospace",
+    }}>
       <span style={{ color }}>{Icons.flag()}</span>
       {m}:{s.toString().padStart(2, "0")}
     </span>
@@ -301,6 +357,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [selectedChat, setSelectedChat] = useState(null);
   const [messageInput, setMessageInput] = useState("");
   const [showTaskModal, setShowTaskModal] = useState(false);
+  const [showChatTaskModal, setShowChatTaskModal] = useState(false);
+  const [chatTask, setChatTask] = useState({ title: "", date: "", time: "10:00", priority: "medium" });
+  const [showOrderInfo, setShowOrderInfo] = useState(false);
   const [newTask, setNewTask] = useState({ title: "", date: "", time: "10:00", priority: "medium" });
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showAnalytics, setShowAnalytics] = useState(false);
@@ -477,6 +536,46 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       }
     } catch (e) {
       console.error("Ошибка удаления задачи:", e);
+    }
+  };
+
+  // Создание задачи прямо из чата (привязка к чату)
+  const addChatTask = async () => {
+    if (!chatTask.title || !chatTask.date || !currentChat) return;
+    if (!apiUrl) return;
+    try {
+      const res = await fetch(`${apiUrl}/tasks`, {
+        method: "POST",
+        headers: getHeaders(),
+        body: JSON.stringify({
+          title: chatTask.title,
+          description: `Чат: ${currentChat.customerName} (${getCabinet(currentChat.cabinetId)?.name || ""})`,
+          dueDate: `${chatTask.date}T${chatTask.time}:00`,
+          priority: chatTask.priority.toUpperCase(),
+          cabinetId: currentChat.cabinetId || null,
+        }),
+      });
+      if (res.ok) {
+        await loadTasks();
+        setChatTask({ title: "", date: "", time: "10:00", priority: "medium" });
+        setShowChatTaskModal(false);
+      }
+    } catch (e) {
+      console.error("Ошибка создания задачи из чата:", e);
+    }
+  };
+
+  // Переход к чату из календаря по описанию задачи
+  const goToChatFromTask = (task) => {
+    if (!task.description) return;
+    const match = task.description.match(/Чат: (.+?) \(/);
+    if (match) {
+      const name = match[1];
+      const chat = chats.find((c) => c.customerName === name);
+      if (chat) {
+        setActiveView("chats");
+        setSelectedChat(chat);
+      }
     }
   };
 
@@ -944,6 +1043,17 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                         {" · "}
                         {getCabinet(task.cabinetId)?.name || task.cabinetName || "—"}
                       </div>
+                      {task.description && task.description.startsWith("Чат:") && (
+                        <div
+                          onClick={(e) => { e.stopPropagation(); goToChatFromTask(task); }}
+                          style={{
+                            fontSize: 11, color: "#a855f7", marginTop: 3,
+                            cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
+                          }}
+                        >
+                          {Icons.chat()} {task.description}
+                        </div>
+                      )}
                     </div>
                     <span
                       style={{
@@ -1334,7 +1444,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                 return (
                   <div
                     key={chat.id}
-                    style={S.chatItem(selectedChat?.id === chat.id)}
+                    style={{ ...S.chatItem(selectedChat?.id === chat.id), flexDirection: "column", gap: 0, paddingBottom: 6 }}
                     onClick={() => {
                       setSelectedChat(chat);
                       setChats((prev) =>
@@ -1342,69 +1452,44 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                       );
                     }}
                   >
-                    <div
-                      style={{
-                        width: 40,
-                        height: 40,
-                        borderRadius: 10,
-                        background: `linear-gradient(135deg, ${mp.color}30, ${mp.color}10)`,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        color: mp.color,
-                        fontSize: 15,
-                        fontWeight: 700,
-                        flexShrink: 0,
-                      }}
-                    >
-                      {chat.customerName[0]}
+                    <div style={{ display: "flex", gap: 12, width: "100%" }}>
+                      <div
+                        style={{
+                          width: 40, height: 40, borderRadius: 10,
+                          background: `linear-gradient(135deg, ${mp.color}30, ${mp.color}10)`,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          color: mp.color, fontSize: 15, fontWeight: 700, flexShrink: 0,
+                        }}
+                      >
+                        {chat.customerName[0]}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>
+                            {chat.customerName}
+                          </span>
+                          {chat.unread > 0 && (
+                            <span style={S.badge(mp.color)}>{chat.unread}</span>
+                          )}
+                        </div>
+                        <div style={{
+                          fontSize: 11, color: "#64748b", marginBottom: 4,
+                          display: "flex", alignItems: "center", gap: 4,
+                        }}>
+                          <span style={{ width: 6, height: 6, borderRadius: "50%", background: mp.color, flexShrink: 0 }} />
+                          {getCabinet(chat.cabinetId)?.name}
+                        </div>
+                        <div style={{
+                          fontSize: 12, color: "#94a3b8",
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                        }}>
+                          {chat.lastMessage}
+                        </div>
+                      </div>
                     </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>
-                          {chat.customerName}
-                        </span>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <TimerBadge lastMessageTime={chat.lastMessageTime} />
-                        </div>
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: "#64748b",
-                          marginBottom: 4,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 4,
-                        }}
-                      >
-                        <span
-                          style={{
-                            width: 6,
-                            height: 6,
-                            borderRadius: "50%",
-                            background: mp.color,
-                            flexShrink: 0,
-                          }}
-                        />
-                        {getCabinet(chat.cabinetId)?.name}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: "#94a3b8",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {chat.lastMessage}
-                      </div>
-                      {chat.unread > 0 && (
-                        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 4 }}>
-                          <span style={S.badge(mp.color)}>{chat.unread}</span>
-                        </div>
-                      )}
+                    {/* Полоска таймера на всю ширину */}
+                    <div style={{ width: "100%", marginTop: 8, position: "relative" }}>
+                      <TimerBar lastMessageTime={chat.lastMessageTime} />
                     </div>
                   </div>
                 );
@@ -1428,16 +1513,11 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                 >
                   <div
                     style={{
-                      width: 38,
-                      height: 38,
-                      borderRadius: 10,
+                      width: 38, height: 38, borderRadius: 10,
                       background: `linear-gradient(135deg, ${getMarketplace(currentChat.marketplaceId)?.color}30, ${getMarketplace(currentChat.marketplaceId)?.color}10)`,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
+                      display: "flex", alignItems: "center", justifyContent: "center",
                       color: getMarketplace(currentChat.marketplaceId)?.color,
-                      fontSize: 15,
-                      fontWeight: 700,
+                      fontSize: 15, fontWeight: 700,
                     }}
                   >
                     {currentChat.customerName[0]}
@@ -1449,10 +1529,68 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                       {getMarketplace(currentChat.marketplaceId)?.name}
                     </div>
                   </div>
-                  <div style={{ marginLeft: "auto" }}>
+                  <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+                    {/* Кнопка задачи из чата */}
+                    <button
+                      onClick={() => {
+                        setChatTask({ ...chatTask, title: `Ответить: ${currentChat.customerName}` });
+                        setShowChatTaskModal(true);
+                      }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 5,
+                        padding: "6px 12px", borderRadius: 8,
+                        background: "rgba(168,85,247,0.1)", border: "1px solid rgba(168,85,247,0.2)",
+                        color: "#a855f7", fontSize: 11, fontWeight: 600,
+                        cursor: "pointer", fontFamily: "inherit",
+                      }}
+                    >
+                      {Icons.calendar()} Задача
+                    </button>
+                    {/* Кнопка информации о заказе */}
+                    <button
+                      onClick={() => setShowOrderInfo(!showOrderInfo)}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 5,
+                        padding: "6px 12px", borderRadius: 8,
+                        background: showOrderInfo ? "rgba(59,130,246,0.15)" : "rgba(59,130,246,0.08)",
+                        border: "1px solid rgba(59,130,246,0.2)",
+                        color: "#3b82f6", fontSize: 11, fontWeight: 600,
+                        cursor: "pointer", fontFamily: "inherit",
+                      }}
+                    >
+                      {Icons.user()} Заказ
+                    </button>
                     <TimerBadge lastMessageTime={currentChat.lastMessageTime} />
                   </div>
                 </div>
+
+                {/* Панель информации о заказе */}
+                {showOrderInfo && (
+                  <div style={{
+                    padding: "12px 24px", borderBottom: "1px solid rgba(255,255,255,0.06)",
+                    background: "rgba(59,130,246,0.04)", display: "flex", gap: 24, flexWrap: "wrap",
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Схема</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentChat.orderScheme || "FBO"}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Номер заказа</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500, fontFamily: "'JetBrains Mono', monospace" }}>{currentChat.orderId || "—"}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Дата заказа</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentChat.orderDate || "—"}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Город</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentChat.orderCity || "—"}</div>
+                    </div>
+                    <div style={{ fontSize: 10, color: "#475569", alignSelf: "center", fontStyle: "italic" }}>
+                      Данные заполняются при DBS/rFBS схемах из API маркетплейса
+                    </div>
+                  </div>
+                )}
 
                 <div style={{ flex: 1, overflow: "auto", padding: "20px 24px" }}>
                   {currentChat.messages.map((msg, i) => (
@@ -1639,6 +1777,83 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                 onClick={addTask}
               >
                 {Icons.plus()} Создать задачу
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Chat Task Modal — задача из чата */}
+      {showChatTaskModal && currentChat && (
+        <div style={S.modal} onClick={() => setShowChatTaskModal(false)}>
+          <div style={S.modalContent} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <h3 style={{ fontSize: 17, fontWeight: 700 }}>Задача по чату</h3>
+              <button
+                onClick={() => setShowChatTaskModal(false)}
+                style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 4 }}
+              >
+                {Icons.x()}
+              </button>
+            </div>
+            <div style={{
+              padding: "10px 14px", marginBottom: 16, borderRadius: 10,
+              background: "rgba(168,85,247,0.06)", border: "1px solid rgba(168,85,247,0.1)",
+            }}>
+              <div style={{ fontSize: 11, color: "#a855f7", marginBottom: 2 }}>Привязан к чату:</div>
+              <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>
+                {currentChat.customerName} · {getCabinet(currentChat.cabinetId)?.name || ""}
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div>
+                <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 6, fontWeight: 500 }}>Название задачи</label>
+                <input
+                  style={S.input}
+                  placeholder="Что нужно сделать?"
+                  value={chatTask.title}
+                  onChange={(e) => setChatTask({ ...chatTask, title: e.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 6, fontWeight: 500 }}>Дата</label>
+                  <input style={S.input} type="date" value={chatTask.date} onChange={(e) => setChatTask({ ...chatTask, date: e.target.value })} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 6, fontWeight: 500 }}>Время</label>
+                  <input style={S.input} type="time" value={chatTask.time} onChange={(e) => setChatTask({ ...chatTask, time: e.target.value })} />
+                </div>
+              </div>
+              <div>
+                <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 6, fontWeight: 500 }}>Приоритет</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {[
+                    { v: "low", l: "Низкий", c: "#22c55e" },
+                    { v: "medium", l: "Средний", c: "#eab308" },
+                    { v: "high", l: "Высокий", c: "#ef4444" },
+                  ].map((p) => (
+                    <button
+                      key={p.v}
+                      onClick={() => setChatTask({ ...chatTask, priority: p.v })}
+                      style={{
+                        flex: 1, padding: "8px 12px", borderRadius: 8,
+                        border: chatTask.priority === p.v ? `2px solid ${p.c}` : "2px solid rgba(255,255,255,0.08)",
+                        background: chatTask.priority === p.v ? `${p.c}15` : "rgba(255,255,255,0.03)",
+                        color: chatTask.priority === p.v ? p.c : "#94a3b8",
+                        fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                      }}
+                    >
+                      {p.l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                style={{ ...S.btn("#a855f7"), width: "100%", justifyContent: "center", marginTop: 4, padding: "12px 16px" }}
+                onClick={addChatTask}
+              >
+                {Icons.plus()} Создать задачу по чату
               </button>
             </div>
           </div>
