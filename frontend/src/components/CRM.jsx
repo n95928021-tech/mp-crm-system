@@ -1,5 +1,43 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import wsService from "../services/websocket.js";
+// wsService загружается лениво чтобы не ломать сборку если socket.io недоступен
+let wsService = null;
+const getWsService = () => {
+  if (!wsService) {
+    try {
+      // Динамический импорт через глобальный объект если доступен
+      wsService = {
+        _socket: null,
+        _listeners: new Map(),
+        connect(token) {
+          try {
+            if (typeof window !== "undefined" && window.io) {
+              this._socket = window.io(import.meta.env.VITE_WS_URL || "http://localhost:4000", {
+                auth: { token }, reconnection: true, reconnectionAttempts: 10,
+              });
+              this._socket.on("connect", () => console.log("🔌 WS подключён"));
+              this._socket.on("disconnect", () => console.log("🔌 WS отключён"));
+              this._listeners.forEach((cbs, evt) => cbs.forEach(cb => this._socket.on(evt, cb)));
+            }
+          } catch(e) { console.warn("WS connect error:", e); }
+        },
+        disconnect() { this._socket?.disconnect(); this._socket = null; },
+        on(evt, cb) {
+          if (!this._listeners.has(evt)) this._listeners.set(evt, new Set());
+          this._listeners.get(evt).add(cb);
+          this._socket?.on(evt, cb);
+        },
+        off(evt, cb) {
+          this._listeners.get(evt)?.delete(cb);
+          this._socket?.off(evt, cb);
+        },
+        emit(evt, data) { this._socket?.connected && this._socket.emit(evt, data); },
+        joinChat(chatId) { this.emit("join_chat", chatId); },
+        joinCabinet(id) { this.emit("join_cabinet", id); },
+      };
+    } catch(e) { console.warn("wsService init error:", e); }
+  }
+  return wsService;
+};
 
 // ─── Sound utility ───
 const playNotificationSound = () => {
@@ -110,6 +148,29 @@ const Icons = {
       <polyline points="12 6 12 12 16 14" />
     </svg>
   ),
+  settings: () => (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+    </svg>
+  ),
+  key: () => (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+    </svg>
+  ),
+  eye: () => (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  ),
+  eyeOff: () => (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
+  ),
 };
 
 // ─── Data ───
@@ -184,7 +245,8 @@ const TimerBar = ({ lastMessageTime }) => {
 };
 
 // ─── Карточка чата с градиентной полоской-таймером справа ───
-const ChatItemWithTimer = ({ chat, mp, active, onClick, getCabinet, badge }) => {
+const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badge }) => {
+  const mp = mpProp || { color: "#6366f1", name: "—" }; // fallback если маркетплейс ещё не загружен
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -246,6 +308,15 @@ const ChatItemWithTimer = ({ chat, mp, active, onClick, getCabinet, badge }) => 
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 3, display: "flex", alignItems: "center", gap: 4 }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: mp.color, flexShrink: 0 }} />
             {getCabinet(chat.cabinetId)?.name}
+            {chat.status && chat.status !== "OPEN" && (
+              <span style={{
+                fontSize: 9, fontWeight: 600, padding: "1px 5px", borderRadius: 4,
+                background: chat.status === "PENDING" ? "rgba(234,179,8,0.15)" : chat.status === "RESOLVED" ? "rgba(59,130,246,0.15)" : "rgba(239,68,68,0.15)",
+                color: chat.status === "PENDING" ? "#eab308" : chat.status === "RESOLVED" ? "#3b82f6" : "#ef4444",
+              }}>
+                {chat.status === "PENDING" ? "Ожидание" : chat.status === "RESOLVED" ? "Решён" : chat.status}
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 12, color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {chat.lastMessage}
@@ -375,10 +446,18 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [newTask, setNewTask] = useState({ title: "", date: "", time: "10:00", priority: "medium" });
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showAnalytics, setShowAnalytics] = useState(false);
+  const [selectedStatus, setSelectedStatus] = useState("OPEN");
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [realAnalytics, setRealAnalytics] = useState(null);
   const chatEndRef = useRef(null);
   const [now, setNow] = useState(new Date());
+  // ─── Настройки ───
+  const [settingsTab, setSettingsTab] = useState("cabinets");
+  const [editingCabinet, setEditingCabinet] = useState(null);
+  const [cabinetForm, setCabinetForm] = useState({});
+  const [cabinetSaving, setCabinetSaving] = useState(false);
+  const [showApiKey, setShowApiKey] = useState({});
+  const [settingsSaved, setSettingsSaved] = useState(null);
 
   // ─── Загрузка маркетплейсов и кабинетов из API ───
   const loadMarketplaces = useCallback(async () => {
@@ -414,6 +493,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       if (selectedCabinet) params.set("cabinetId", selectedCabinet);
       else if (selectedMarketplace) params.set("marketplaceId", selectedMarketplace);
       params.set("limit", "100");
+      if (selectedStatus) params.set("status", selectedStatus);
       const res = await fetch(`${apiUrl}/chats?${params}`, { headers: getHeaders() });
       if (res.ok) {
         const data = await res.json();
@@ -436,7 +516,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     } finally {
       setChatsLoading(false);
     }
-  }, [apiUrl, selectedMarketplace, selectedCabinet]);
+  }, [apiUrl, selectedMarketplace, selectedCabinet, selectedStatus]);
 
   // ─── Загрузка сообщений конкретного чата ───
   const loadChatMessages = useCallback(async (chatId) => {
@@ -532,7 +612,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
 
-    wsService.connect(token);
+    getWsService().connect(token);
 
     // Новое сообщение от покупателя
     const onNewMessage = ({ chatId, message }) => {
@@ -560,15 +640,15 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       setChats((prev) => prev.map((c) => c.id === chatId ? { ...c, ...updates } : c));
     };
 
-    wsService.on("new_message", onNewMessage);
-    wsService.on("chat_updated", onChatUpdated);
+    getWsService().on("new_message", onNewMessage);
+    getWsService().on("chat_updated", onChatUpdated);
 
     // Периодическое обновление списка чатов (каждые 30 сек)
     const pollInterval = setInterval(() => loadChats(), 30000);
 
     return () => {
-      wsService.off("new_message", onNewMessage);
-      wsService.off("chat_updated", onChatUpdated);
+      getWsService().off("new_message", onNewMessage);
+      getWsService().off("chat_updated", onChatUpdated);
       clearInterval(pollInterval);
     };
   }, [apiUrl, soundEnabled, loadChats]);
@@ -581,8 +661,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     let result = chats;
     if (selectedCabinet) result = result.filter((c) => c.cabinetId === selectedCabinet);
     else if (selectedMarketplace) result = result.filter((c) => c.marketplaceId === selectedMarketplace);
+    if (selectedStatus) result = result.filter((c) => c.status === selectedStatus);
     return result.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
-  }, [chats, selectedMarketplace, selectedCabinet]);
+  }, [chats, selectedMarketplace, selectedCabinet, selectedStatus]);
 
   const sendMessage = async () => {
     if (!messageInput.trim() || !selectedChat) return;
@@ -1389,6 +1470,335 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     );
   };
 
+  // ─── Settings View ───
+  const renderSettings = () => {
+    const saveCabinet = async () => {
+      if (!editingCabinet) return;
+      setCabinetSaving(true);
+      try {
+        const res = await fetch(`${apiUrl}/cabinets/${editingCabinet}`, {
+          method: "PUT",
+          headers: getHeaders(),
+          body: JSON.stringify(cabinetForm),
+        });
+        if (res.ok) {
+          setSettingsSaved("Сохранено!");
+          setTimeout(() => setSettingsSaved(null), 2500);
+          await loadMarketplaces();
+          setEditingCabinet(null);
+          setCabinetForm({});
+        } else {
+          const err = await res.json();
+          setSettingsSaved("Ошибка: " + (err.error || "неизвестная"));
+          setTimeout(() => setSettingsSaved(null), 3000);
+        }
+      } catch (e) {
+        setSettingsSaved("Ошибка сети");
+        setTimeout(() => setSettingsSaved(null), 3000);
+      } finally {
+        setCabinetSaving(false);
+      }
+    };
+
+    return (
+      <div style={{ flex: 1, overflow: "auto", padding: 24 }}>
+        {/* Header */}
+        <div style={{ marginBottom: 24 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>Настройки</h2>
+          <p style={{ fontSize: 13, color: "#64748b", margin: "4px 0 0" }}>Кабинеты и API-ключи маркетплейсов</p>
+        </div>
+
+        {/* Saved toast */}
+        {settingsSaved && (
+          <div style={{
+            position: "fixed", top: 20, right: 20, zIndex: 9999,
+            padding: "12px 20px", borderRadius: 10,
+            background: settingsSaved.startsWith("Ошибка") ? "rgba(239,68,68,0.15)" : "rgba(34,197,94,0.15)",
+            border: `1px solid ${settingsSaved.startsWith("Ошибка") ? "rgba(239,68,68,0.3)" : "rgba(34,197,94,0.3)"}`,
+            color: settingsSaved.startsWith("Ошибка") ? "#ef4444" : "#22c55e",
+            fontSize: 13, fontWeight: 600,
+          }}>
+            {settingsSaved}
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 24, borderBottom: "1px solid rgba(255,255,255,0.06)", paddingBottom: 0 }}>
+          {[
+            { v: "cabinets", l: "Кабинеты и API" },
+            { v: "system", l: "Система" },
+          ].map(({ v, l }) => (
+            <button key={v} onClick={() => setSettingsTab(v)} style={{
+              padding: "8px 16px", background: "none", border: "none",
+              borderBottom: settingsTab === v ? "2px solid #a855f7" : "2px solid transparent",
+              color: settingsTab === v ? "#a855f7" : "#64748b",
+              fontSize: 13, fontWeight: settingsTab === v ? 600 : 400,
+              cursor: "pointer", fontFamily: "inherit", marginBottom: -1,
+            }}>{l}</button>
+          ))}
+        </div>
+
+        {/* Cabinets tab */}
+        {settingsTab === "cabinets" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {marketplaces.map((mp) => (
+              <div key={mp.id} style={{
+                background: "rgba(255,255,255,0.02)", borderRadius: 14,
+                border: "1px solid rgba(255,255,255,0.06)", overflow: "hidden",
+              }}>
+                {/* Marketplace header */}
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.04)",
+                  background: `linear-gradient(90deg, ${mp.color}10, transparent)`,
+                }}>
+                  <span style={{ color: mp.color }}>{mp.icon()}</span>
+                  <span style={{ fontSize: 15, fontWeight: 700 }}>{mp.name}</span>
+                  <span style={{ fontSize: 11, color: "#475569", marginLeft: 4 }}>{mp.cabinets.length} кабинетов</span>
+                </div>
+                {/* Cabinets list */}
+                {mp.cabinets.map((cab) => (
+                  <div key={cab.id}>
+                    <div style={{
+                      display: "flex", alignItems: "center", gap: 12,
+                      padding: "12px 20px",
+                      borderBottom: "1px solid rgba(255,255,255,0.03)",
+                      background: editingCabinet === cab.id ? "rgba(168,85,247,0.04)" : "transparent",
+                    }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{cab.name}</div>
+                        <div style={{ fontSize: 10, color: "#334155", fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>
+                          ID: {cab.id}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6" }}>
+                        <span style={{
+                          fontSize: 10, padding: "2px 8px", borderRadius: 5, fontWeight: 600,
+                          background: cab.chatCount > 0 ? "rgba(34,197,94,0.12)" : "rgba(255,255,255,0.04)",
+                          color: cab.chatCount > 0 ? "#22c55e" : "#475569",
+                        }}>
+                          {cab.chatCount} чатов
+                        </span>
+                        <button
+                          onClick={() => {
+                            if (editingCabinet === cab.id) {
+                              setEditingCabinet(null);
+                              setCabinetForm({});
+                            } else {
+                              setEditingCabinet(cab.id);
+                              setCabinetForm({ name: cab.name });
+                            }
+                          }}
+                          style={{
+                            ...S.btn(editingCabinet === cab.id ? "#64748b" : "#a855f7"),
+                            padding: "5px 12px", fontSize: 11,
+                          }}
+                        >
+                          {editingCabinet === cab.id ? "Отмена" : "Настроить"}
+                        </button>
+                      </div>
+                    </div>
+                    {/* Edit form */}
+                    {editingCabinet === cab.id && (
+                      <div style={{
+                        padding: "16px 20px 20px",
+                        background: "rgba(168,85,247,0.03)",
+                        borderBottom: "1px solid rgba(255,255,255,0.04)",
+                      }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                          <div>
+                            <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
+                              Название кабинета
+                            </label>
+                            <input
+                              style={S.input}
+                              value={cabinetForm.name || ""}
+                              onChange={(e) => setCabinetForm({ ...cabinetForm, name: e.target.value })}
+                              placeholder="Название"
+                            />
+                          </div>
+                          {mp.id === "wb" && (
+                            <div>
+                              <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
+                                API Token (Wildberries)
+                              </label>
+                              <div style={{ position: "relative" }}>
+                                <input
+                                  style={{ ...S.input, paddingRight: 36, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}
+                                  type={showApiKey[cab.id] ? "text" : "password"}
+                                  value={cabinetForm.apiToken || ""}
+                                  onChange={(e) => setCabinetForm({ ...cabinetForm, apiToken: e.target.value })}
+                                  placeholder="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+                                />
+                                <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id]: !p[cab.id] }))} style={{
+                                  position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+                                  background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2,
+                                }}>
+                                  {showApiKey[cab.id] ? Icons.eyeOff() : Icons.eye()}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {mp.id === "ozon" && (
+                            <>
+                              <div>
+                                <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
+                                  Client ID (Ozon)
+                                </label>
+                                <input
+                                  style={S.input}
+                                  value={cabinetForm.apiClientId || ""}
+                                  onChange={(e) => setCabinetForm({ ...cabinetForm, apiClientId: e.target.value })}
+                                  placeholder="123456"
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
+                                  API Key (Ozon)
+                                </label>
+                                <div style={{ position: "relative" }}>
+                                  <input
+                                    style={{ ...S.input, paddingRight: 36, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}
+                                    type={showApiKey[cab.id + "_key"] ? "text" : "password"}
+                                    value={cabinetForm.apiKey || ""}
+                                    onChange={(e) => setCabinetForm({ ...cabinetForm, apiKey: e.target.value })}
+                                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                  />
+                                  <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id + "_key"]: !p[cab.id + "_key"] }))} style={{
+                                    position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+                                    background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2,
+                                  }}>
+                                    {showApiKey[cab.id + "_key"] ? Icons.eyeOff() : Icons.eye()}
+                                  </button>
+                                </div>
+                              </div>
+                            </>
+                          )}
+                          {mp.id === "yandex" && (
+                            <>
+                              <div>
+                                <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
+                                  OAuth Token (Яндекс)
+                                </label>
+                                <div style={{ position: "relative" }}>
+                                  <input
+                                    style={{ ...S.input, paddingRight: 36, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}
+                                    type={showApiKey[cab.id] ? "text" : "password"}
+                                    value={cabinetForm.apiToken || ""}
+                                    onChange={(e) => setCabinetForm({ ...cabinetForm, apiToken: e.target.value })}
+                                    placeholder="y0_AgAAAA..."
+                                  />
+                                  <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id]: !p[cab.id] }))} style={{
+                                    position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+                                    background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2,
+                                  }}>
+                                    {showApiKey[cab.id] ? Icons.eyeOff() : Icons.eye()}
+                                  </button>
+                                </div>
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
+                                  Campaign ID
+                                </label>
+                                <input
+                                  style={S.input}
+                                  value={cabinetForm.campaignId || ""}
+                                  onChange={(e) => setCabinetForm({ ...cabinetForm, campaignId: e.target.value })}
+                                  placeholder="12345678"
+                                />
+                              </div>
+                            </>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button
+                            onClick={saveCabinet}
+                            disabled={cabinetSaving}
+                            style={{ ...S.btn("#a855f7"), opacity: cabinetSaving ? 0.6 : 1 }}
+                          >
+                            {cabinetSaving ? "Сохранение..." : "💾 Сохранить"}
+                          </button>
+                          <button onClick={() => { setEditingCabinet(null); setCabinetForm({}); }} style={S.btn("#475569")}>
+                            Отмена
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* System tab */}
+        {settingsTab === "system" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 500 }}>
+            <div style={{
+              padding: "20px", borderRadius: 14,
+              background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 16 }}>Учётная запись</div>
+              {user && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {[
+                    { l: "Имя", v: `${user.firstName} ${user.lastName}` },
+                    { l: "Email", v: user.email },
+                    { l: "Роль", v: user.role },
+                  ].map(({ l, v }) => (
+                    <div key={l} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: 12, color: "#64748b" }}>{l}</span>
+                      <span style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={{
+              padding: "20px", borderRadius: 14,
+              background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 16 }}>Уведомления</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontSize: 13, color: "#e2e8f0" }}>Звуковые уведомления</div>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>Звук при новом сообщении</div>
+                </div>
+                <button
+                  onClick={() => setSoundEnabled(!soundEnabled)}
+                  style={{
+                    width: 44, height: 24, borderRadius: 12, border: "none", cursor: "pointer",
+                    background: soundEnabled ? "#a855f7" : "rgba(255,255,255,0.1)",
+                    position: "relative", transition: "background 0.2s",
+                  }}
+                >
+                  <span style={{
+                    position: "absolute", top: 2, left: soundEnabled ? 22 : 2,
+                    width: 20, height: 20, borderRadius: "50%", background: "#fff",
+                    transition: "left 0.2s",
+                  }} />
+                </button>
+              </div>
+            </div>
+            <div style={{
+              padding: "16px 20px", borderRadius: 14,
+              background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+            }}>
+              <div>
+                <div style={{ fontSize: 13, color: "#e2e8f0" }}>Backend API</div>
+                <div style={{ fontSize: 11, color: "#64748b", fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>{apiUrl}</div>
+              </div>
+              <span style={{ fontSize: 10, padding: "3px 8px", borderRadius: 5, background: "rgba(34,197,94,0.12)", color: "#22c55e", fontWeight: 600 }}>
+                Подключён
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ─── Render ───
   return (
     <div style={S.app}>
@@ -1445,6 +1855,13 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           >
             {Icons.analytics()}
             <span>Аналитика</span>
+          </button>
+          <button
+            style={S.navBtn(activeView === "settings")}
+            onClick={() => setActiveView("settings")}
+          >
+            {Icons.settings()}
+            <span>Настройки</span>
           </button>
         </div>
 
@@ -1568,16 +1985,49 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         <>
           {/* Chat List */}
           <div style={S.chatList}>
-            <div style={S.chatListHeader}>
-              <div>
+            <div style={{ ...S.chatListHeader, flexDirection: "column", gap: 10, padding: "14px 16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
                 <div style={{ fontSize: 15, fontWeight: 700 }}>Сообщения</div>
-                <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
-                  {filteredChats.length} чатов
-                </div>
+                <button
+                  onClick={() => loadChats()}
+                  style={{
+                    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: 6, padding: "4px 8px", color: "#64748b", cursor: "pointer",
+                    fontSize: 11, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4,
+                  }}
+                  title="Обновить"
+                >
+                  ↻ {filteredChats.length}
+                </button>
+              </div>
+              {/* Фильтр статусов */}
+              <div style={{ display: "flex", gap: 4, width: "100%" }}>
+                {[
+                  { v: "OPEN",     l: "Открытые",  c: "#22c55e" },
+                  { v: "PENDING",  l: "Ожидание",  c: "#eab308" },
+                  { v: "RESOLVED", l: "Решённые",  c: "#3b82f6" },
+                  { v: null,       l: "Все",        c: "#94a3b8" },
+                ].map(({ v, l, c }) => (
+                  <button
+                    key={v || "all"}
+                    onClick={() => setSelectedStatus(v)}
+                    style={{
+                      flex: 1, padding: "5px 4px", borderRadius: 6, border: "none",
+                      background: selectedStatus === v ? `${c}20` : "rgba(255,255,255,0.03)",
+                      color: selectedStatus === v ? c : "#475569",
+                      fontSize: 10, fontWeight: selectedStatus === v ? 700 : 400,
+                      cursor: "pointer", fontFamily: "inherit",
+                      borderBottom: selectedStatus === v ? `2px solid ${c}` : "2px solid transparent",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    {l}
+                  </button>
+                ))}
               </div>
             </div>
             <div style={{ flex: 1, overflow: "auto" }}>
-              {chatsLoading ? (
+              {(chatsLoading || marketplaces.length === 0) ? (
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, color: "#475569", fontSize: 13 }}>
                   Загрузка чатов...
                 </div>
@@ -1587,8 +2037,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   <div>Нет чатов</div>
                 </div>
               ) : null}
-              {!chatsLoading && filteredChats.map((chat) => {
+              {!chatsLoading && marketplaces.length > 0 && filteredChats.map((chat) => {
                 const mp = getMarketplace(chat.marketplaceId);
+                if (!mp) return null; // маркетплейс ещё не загружен
                 return (
                   <ChatItemWithTimer
                     key={chat.id}
@@ -1603,7 +2054,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                         loadChatMessages(chat.id);
                       }
                       // WS: подписка на чат
-                      wsService.joinChat(chat.id);
+                      getWsService().joinChat(chat.id);
                       // Помечаем прочитанным через API
                       if (apiUrl) {
                         fetch(`${apiUrl}/chats/${chat.id}/read`, { method: "PATCH", headers: getHeaders() }).catch(() => {});
@@ -1650,6 +2101,30 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     </div>
                   </div>
                   <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+                    {/* Статус чата */}
+                    <select
+                      value={currentChat.status || "OPEN"}
+                      onChange={async (e) => {
+                        const newStatus = e.target.value;
+                        if (apiUrl) {
+                          await fetch(`${apiUrl}/chats/${currentChat.id}/status`, {
+                            method: "PATCH", headers: getHeaders(),
+                            body: JSON.stringify({ status: newStatus }),
+                          }).catch(() => {});
+                          setChats((prev) => prev.map((c) => c.id === currentChat.id ? { ...c, status: newStatus } : c));
+                        }
+                      }}
+                      style={{
+                        background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
+                        borderRadius: 8, padding: "5px 8px", color: "#e2e8f0",
+                        fontSize: 11, fontFamily: "inherit", cursor: "pointer",
+                      }}
+                    >
+                      <option value="OPEN">Открыт</option>
+                      <option value="PENDING">Ожидание</option>
+                      <option value="RESOLVED">Решён</option>
+                      <option value="CLOSED">Закрыт</option>
+                    </select>
                     {/* Кнопка задачи из чата */}
                     <button
                       onClick={() => {
@@ -1804,6 +2279,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
 
       {activeView === "calendar" && renderCalendar()}
       {activeView === "analytics" && renderAnalytics()}
+      {activeView === "settings" && renderSettings()}
 
       {/* Task Modal */}
       {showTaskModal && (
