@@ -293,7 +293,8 @@ const TimerBadge = ({ lastMessageTime }) => {
 // ─── Main App ───
 export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [chats, setChats] = useState(() => generateChats());
-  const [tasks, setTasks] = useState(() => generateTasks());
+  const [tasks, setTasks] = useState([]);
+  const [tasksLoading, setTasksLoading] = useState(true);
   const [activeView, setActiveView] = useState("chats");
   const [selectedMarketplace, setSelectedMarketplace] = useState(null);
   const [selectedCabinet, setSelectedCabinet] = useState(null);
@@ -303,8 +304,63 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [newTask, setNewTask] = useState({ title: "", date: "", time: "10:00", priority: "medium" });
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showAnalytics, setShowAnalytics] = useState(false);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [realAnalytics, setRealAnalytics] = useState(null);
   const chatEndRef = useRef(null);
   const [now, setNow] = useState(new Date());
+
+  // ─── Загрузка задач из API ───
+  const loadTasks = useCallback(async () => {
+    if (!apiUrl) return;
+    try {
+      const res = await fetch(`${apiUrl}/tasks`, { headers: getHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const mapped = (data.data || []).map((t) => ({
+          id: t.id,
+          title: t.title,
+          description: t.description,
+          date: new Date(t.dueDate),
+          completed: t.status === "DONE",
+          overdue: t.isOverdue,
+          cabinetId: t.cabinetId || "",
+          cabinetName: t.cabinet?.name || "",
+          priority: (t.priority || "MEDIUM").toLowerCase(),
+          status: t.status,
+        }));
+        setTasks(mapped);
+      }
+    } catch (e) {
+      console.error("Ошибка загрузки задач:", e);
+    } finally {
+      setTasksLoading(false);
+    }
+  }, [apiUrl]);
+
+  // ─── Загрузка аналитики из API ───
+  const loadAnalytics = useCallback(async () => {
+    if (!apiUrl) return;
+    setAnalyticsLoading(true);
+    try {
+      const res = await fetch(`${apiUrl}/analytics/response-time`, { headers: getHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setRealAnalytics(data.data);
+      }
+    } catch (e) {
+      console.error("Ошибка загрузки аналитики:", e);
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }, [apiUrl]);
+
+  useEffect(() => {
+    loadTasks();
+  }, [loadTasks]);
+
+  useEffect(() => {
+    if (activeView === "analytics") loadAnalytics();
+  }, [activeView, loadAnalytics]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -370,27 +426,58 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     setMessageInput("");
   };
 
-  const addTask = () => {
+  const addTask = async () => {
     if (!newTask.title || !newTask.date) return;
-    const d = new Date(`${newTask.date}T${newTask.time}`);
-    setTasks((prev) => [
-      ...prev,
-      {
-        id: `task-${Date.now()}`,
-        title: newTask.title,
-        date: d,
-        completed: false,
-        overdue: false,
-        cabinetId: selectedCabinet || "wb1",
-        priority: newTask.priority,
-      },
-    ]);
-    setNewTask({ title: "", date: "", time: "10:00", priority: "medium" });
-    setShowTaskModal(false);
+    if (!apiUrl) return;
+    try {
+      const res = await fetch(`${apiUrl}/tasks`, {
+        method: "POST",
+        headers: getHeaders(),
+        body: JSON.stringify({
+          title: newTask.title,
+          dueDate: `${newTask.date}T${newTask.time}:00`,
+          priority: newTask.priority.toUpperCase(),
+          cabinetId: selectedCabinet || null,
+        }),
+      });
+      if (res.ok) {
+        await loadTasks();
+        setNewTask({ title: "", date: "", time: "10:00", priority: "medium" });
+        setShowTaskModal(false);
+      }
+    } catch (e) {
+      console.error("Ошибка создания задачи:", e);
+    }
   };
 
-  const toggleTask = (id) => {
-    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t)));
+  const toggleTask = async (id) => {
+    if (!apiUrl) return;
+    try {
+      const res = await fetch(`${apiUrl}/tasks/${id}/toggle`, {
+        method: "PATCH",
+        headers: getHeaders(),
+      });
+      if (res.ok) {
+        await loadTasks();
+      }
+    } catch (e) {
+      console.error("Ошибка переключения задачи:", e);
+    }
+  };
+
+  const deleteTask = async (id) => {
+    if (!apiUrl) return;
+    try {
+      const res = await fetch(`${apiUrl}/tasks/${id}`, {
+        method: "DELETE",
+        headers: getHeaders(),
+      });
+      if (res.ok) {
+        await loadTasks();
+      }
+    } catch (e) {
+      console.error("Ошибка удаления задачи:", e);
+    }
   };
 
   const currentChat = useMemo(
@@ -408,6 +495,24 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   };
 
   const analyticsData = useMemo(() => {
+    // Используем реальные данные если есть
+    if (realAnalytics) {
+      const byMarketplace = {};
+      const byCabinet = {};
+      (realAnalytics.byMarketplace || []).forEach((m) => {
+        byMarketplace[m.marketplaceId] = { name: m.marketplaceName, avg: m.avgResponseSec, count: m.count };
+      });
+      (realAnalytics.byCabinet || []).forEach((c) => {
+        byCabinet[c.cabinetId] = { name: c.cabinetName, avg: c.avgResponseSec, count: c.count };
+      });
+      return {
+        byMarketplace,
+        byCabinet,
+        totalAvg: realAnalytics.totalAvgResponseSec || 0,
+        totalChats: realAnalytics.totalChats || 0,
+      };
+    }
+    // Fallback на демо-данные из чатов
     const byMarketplace = {};
     const byCabinet = {};
     MARKETPLACES.forEach((mp) => {
@@ -428,7 +533,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       ? Math.round(chats.reduce((s, c) => s + c.responseTimeSec, 0) / chats.length)
       : 0;
     return { byMarketplace, byCabinet, totalAvg, totalChats: chats.length };
-  }, [chats]);
+  }, [chats, realAnalytics]);
 
   const formatTime = (sec) => {
     const m = Math.floor(sec / 60);
@@ -837,7 +942,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                           minute: "2-digit",
                         })}
                         {" · "}
-                        {getCabinet(task.cabinetId)?.name || "—"}
+                        {getCabinet(task.cabinetId)?.name || task.cabinetName || "—"}
                       </div>
                     </div>
                     <span
@@ -902,14 +1007,29 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           </div>
           <button
             style={S.btn("#3b82f6")}
-            onClick={() => {
+            onClick={async () => {
+              if (apiUrl) {
+                try {
+                  const res = await fetch(`${apiUrl}/analytics/response-time/export`, { headers: getHeaders() });
+                  if (res.ok) {
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `analytics_${Date.now()}.csv`;
+                    a.click();
+                    return;
+                  }
+                } catch (e) { console.error(e); }
+              }
+              // Fallback
               const csv = [
                 "Кабинет,Среднее время (сек),Количество чатов",
                 ...Object.values(analyticsData.byCabinet).map(
                   (c) => `${c.name},${c.avg},${c.count}`
                 ),
               ].join("\n");
-              const blob = new Blob([csv], { type: "text/csv" });
+              const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
               const url = URL.createObjectURL(blob);
               const a = document.createElement("a");
               a.href = url;
