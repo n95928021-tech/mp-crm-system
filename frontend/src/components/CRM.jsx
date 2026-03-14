@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import wsService from "../services/websocket.js";
 
 // ─── Sound utility ───
 const playNotificationSound = () => {
@@ -480,7 +481,8 @@ const TimerBadge = ({ lastMessageTime }) => {
 
 // ─── Main App ───
 export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
-  const [chats, setChats] = useState(() => generateChats());
+  const [chats, setChats] = useState([]);
+  const [chatsLoading, setChatsLoading] = useState(true);
   const [tasks, setTasks] = useState([]);
   const [tasksLoading, setTasksLoading] = useState(true);
   const [activeView, setActiveView] = useState("chats");
@@ -500,6 +502,58 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [realAnalytics, setRealAnalytics] = useState(null);
   const chatEndRef = useRef(null);
   const [now, setNow] = useState(new Date());
+
+  // ─── Загрузка чатов из API ───
+  const loadChats = useCallback(async () => {
+    if (!apiUrl) { setChatsLoading(false); return; }
+    try {
+      const params = new URLSearchParams();
+      if (selectedCabinet) params.set("cabinetId", selectedCabinet);
+      else if (selectedMarketplace) params.set("marketplaceId", selectedMarketplace);
+      params.set("limit", "100");
+      const res = await fetch(`${apiUrl}/chats?${params}`, { headers: getHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const mapped = (data.data || []).map((c) => ({
+          id: c.id,
+          cabinetId: c.cabinetId,
+          marketplaceId: c.cabinet?.marketplace?.slug || c.cabinet?.marketplaceId || "wb",
+          customerName: c.customerName,
+          lastMessage: c.lastMessageText || "",
+          lastMessageTime: c.lastMessageAt ? new Date(c.lastMessageAt) : new Date(c.createdAt),
+          unread: c.unreadCount || 0,
+          responseTimeSec: c.elapsedSeconds || 0,
+          status: c.status,
+          messages: [],
+        }));
+        setChats(mapped);
+      }
+    } catch (e) {
+      console.error("Ошибка загрузки чатов:", e);
+    } finally {
+      setChatsLoading(false);
+    }
+  }, [apiUrl, selectedMarketplace, selectedCabinet]);
+
+  // ─── Загрузка сообщений конкретного чата ───
+  const loadChatMessages = useCallback(async (chatId) => {
+    if (!apiUrl) return;
+    try {
+      const res = await fetch(`${apiUrl}/chats/${chatId}`, { headers: getHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const msgs = (data.data?.messages || []).map((m) => ({
+          id: m.id,
+          from: m.senderType === "MANAGER" ? "manager" : "customer",
+          text: m.text,
+          time: new Date(m.createdAt),
+        }));
+        setChats((prev) => prev.map((c) => c.id === chatId ? { ...c, messages: msgs } : c));
+      }
+    } catch (e) {
+      console.error("Ошибка загрузки сообщений:", e);
+    }
+  }, [apiUrl]);
 
   // ─── Загрузка задач из API ───
   const loadTasks = useCallback(async () => {
@@ -559,32 +613,57 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     return () => clearInterval(t);
   }, []);
 
-  // Simulate new message
+  // ─── Загрузка чатов при смене фильтра ───
   useEffect(() => {
-    const interval = setInterval(() => {
-      setChats((prev) => {
-        const idx = Math.floor(Math.random() * prev.length);
-        const updated = [...prev];
-        const chat = { ...updated[idx] };
-        chat.lastMessage = MSGS[Math.floor(Math.random() * MSGS.length)];
-        chat.lastMessageTime = new Date();
-        chat.unread = (chat.unread || 0) + 1;
-        chat.messages = [
-          ...chat.messages,
-          {
-            id: chat.messages.length + 1,
-            from: "customer",
-            text: chat.lastMessage,
-            time: new Date(),
-          },
-        ];
-        updated[idx] = chat;
-        if (soundEnabled) playNotificationSound();
-        return updated;
-      });
-    }, 15000);
-    return () => clearInterval(interval);
-  }, [soundEnabled]);
+    loadChats();
+  }, [loadChats]);
+
+  // ─── WebSocket: подключение и реал-тайм события ───
+  useEffect(() => {
+    if (!apiUrl) return;
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+
+    wsService.connect(token);
+
+    // Новое сообщение от покупателя
+    const onNewMessage = ({ chatId, message }) => {
+      setChats((prev) => prev.map((c) => {
+        if (c.id !== chatId) return c;
+        const newMsg = {
+          id: message.id,
+          from: message.senderType === "MANAGER" ? "manager" : "customer",
+          text: message.text,
+          time: new Date(message.createdAt),
+        };
+        return {
+          ...c,
+          lastMessage: message.text,
+          lastMessageTime: new Date(message.createdAt),
+          unread: (c.unread || 0) + (message.senderType !== "MANAGER" ? 1 : 0),
+          messages: [...(c.messages || []), newMsg],
+        };
+      }));
+      if (soundEnabled) playNotificationSound();
+    };
+
+    // Обновление чата (статус, назначение)
+    const onChatUpdated = ({ chatId, ...updates }) => {
+      setChats((prev) => prev.map((c) => c.id === chatId ? { ...c, ...updates } : c));
+    };
+
+    wsService.on("new_message", onNewMessage);
+    wsService.on("chat_updated", onChatUpdated);
+
+    // Периодическое обновление списка чатов (каждые 30 сек)
+    const pollInterval = setInterval(() => loadChats(), 30000);
+
+    return () => {
+      wsService.off("new_message", onNewMessage);
+      wsService.off("chat_updated", onChatUpdated);
+      clearInterval(pollInterval);
+    };
+  }, [apiUrl, soundEnabled, loadChats]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -594,28 +673,34 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     let result = chats;
     if (selectedCabinet) result = result.filter((c) => c.cabinetId === selectedCabinet);
     else if (selectedMarketplace) result = result.filter((c) => c.marketplaceId === selectedMarketplace);
-    return result.sort((a, b) => b.lastMessageTime - a.lastMessageTime);
+    return result.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
   }, [chats, selectedMarketplace, selectedCabinet]);
 
-  const sendMessage = () => {
+  const sendMessage = async () => {
     if (!messageInput.trim() || !selectedChat) return;
-    setChats((prev) =>
-      prev.map((c) =>
-        c.id === selectedChat.id
-          ? {
-              ...c,
-              messages: [
-                ...c.messages,
-                { id: c.messages.length + 1, from: "manager", text: messageInput, time: new Date() },
-              ],
-              lastMessage: messageInput,
-              lastMessageTime: new Date(),
-              unread: 0,
-            }
-          : c
-      )
-    );
+    const text = messageInput;
     setMessageInput("");
+    // Оптимистичное обновление UI
+    const tempMsg = { id: `temp-${Date.now()}`, from: "manager", text, time: new Date() };
+    setChats((prev) => prev.map((c) =>
+      c.id === selectedChat.id
+        ? { ...c, messages: [...(c.messages || []), tempMsg], lastMessage: text, lastMessageTime: new Date(), unread: 0 }
+        : c
+    ));
+    // Отправляем на сервер
+    if (apiUrl) {
+      try {
+        await fetch(`${apiUrl}/chats/${selectedChat.id}/messages`, {
+          method: "POST",
+          headers: getHeaders(),
+          body: JSON.stringify({ text }),
+        });
+        // Пометить прочитанным
+        await fetch(`${apiUrl}/chats/${selectedChat.id}/read`, { method: "PATCH", headers: getHeaders() });
+      } catch (e) {
+        console.error("Ошибка отправки сообщения:", e);
+      }
+    }
   };
 
   const addTask = async () => {
@@ -1576,7 +1661,17 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
               </div>
             </div>
             <div style={{ flex: 1, overflow: "auto" }}>
-              {filteredChats.map((chat) => {
+              {chatsLoading ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, color: "#475569", fontSize: 13 }}>
+                  Загрузка чатов...
+                </div>
+              ) : filteredChats.length === 0 ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, color: "#475569", fontSize: 13, flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 32, opacity: 0.3 }}>💬</div>
+                  <div>Нет чатов</div>
+                </div>
+              ) : null}
+              {!chatsLoading && filteredChats.map((chat) => {
                 const mp = getMarketplace(chat.marketplaceId);
                 return (
                   <ChatItemWithTimer
@@ -1586,9 +1681,17 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     active={selectedChat?.id === chat.id}
                     onClick={() => {
                       setSelectedChat(chat);
-                      setChats((prev) =>
-                        prev.map((c) => (c.id === chat.id ? { ...c, unread: 0 } : c))
-                      );
+                      setChats((prev) => prev.map((c) => (c.id === chat.id ? { ...c, unread: 0 } : c)));
+                      // Загружаем сообщения если ещё не загружены
+                      if (!chat.messages || chat.messages.length === 0) {
+                        loadChatMessages(chat.id);
+                      }
+                      // WS: подписка на чат
+                      wsService.joinChat(chat.id);
+                      // Помечаем прочитанным через API
+                      if (apiUrl) {
+                        fetch(`${apiUrl}/chats/${chat.id}/read`, { method: "PATCH", headers: getHeaders() }).catch(() => {});
+                      }
                     }}
                     getCabinet={getCabinet}
                     badge={S.badge}
