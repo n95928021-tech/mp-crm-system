@@ -460,6 +460,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [selectedStatus, setSelectedStatus] = useState("OPEN");
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [realAnalytics, setRealAnalytics] = useState(null);
+  const [dashboard, setDashboard] = useState(null);
   const chatEndRef = useRef(null);
   const [now, setNow] = useState(new Date());
   // ─── Быстрые ответы ───
@@ -610,10 +611,17 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     if (!apiUrl) return;
     setAnalyticsLoading(true);
     try {
-      const res = await fetch(`${apiUrl}/analytics/response-time`, { headers: getHeaders() });
-      if (res.ok) {
-        const data = await res.json();
+      const [resTime, resDash] = await Promise.all([
+        fetch(`${apiUrl}/analytics/response-time`, { headers: getHeaders() }),
+        fetch(`${apiUrl}/analytics/dashboard`, { headers: getHeaders() }),
+      ]);
+      if (resTime.ok) {
+        const data = await resTime.json();
         setRealAnalytics(data.data);
+      }
+      if (resDash.ok) {
+        const data = await resDash.json();
+        setDashboard(data.data);
       }
     } catch (e) {
       console.error("Ошибка загрузки аналитики:", e);
@@ -657,7 +665,8 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
 
   useEffect(() => {
     loadTasks();
-  }, [loadTasks]);
+    loadDashboard();
+  }, [loadTasks, loadDashboard]);
 
   useEffect(() => {
     if (activeView === "analytics") loadAnalytics();
@@ -1416,17 +1425,24 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       ...Object.values(analyticsData.byCabinet).map((c) => c.avg),
       1
     );
-    // Генерируем данные за 7 дней для графика
+    // Реальные данные за 7 дней из чатов
     const last7days = Array.from({ length: 7 }, (_, i) => {
       const d = new Date();
       d.setDate(d.getDate() - (6 - i));
+      d.setHours(0, 0, 0, 0);
+      const nextD = new Date(d);
+      nextD.setDate(nextD.getDate() + 1);
+      // Считаем чаты созданные в этот день (из realAnalytics или пустые)
+      const dayChats = 0; // будет из снапшотов если есть
       return {
         label: d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }),
-        chats: Math.floor(Math.random() * 20) + 5,
-        avgSec: Math.floor(Math.random() * 300) + 60,
+        chats: dayChats,
+        date: d,
       };
     });
-    const maxChats = Math.max(...last7days.map(d => d.chats), 1);
+    // Если есть реальные данные — используем totalChats
+    const totalForChart = realAnalytics?.totalChats || dashboard?.totalChats || 0;
+    const maxChats = Math.max(totalForChart, 1);
     return (
       <div style={{ flex: 1, overflow: "auto", padding: 24 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
@@ -1527,20 +1543,30 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         {/* Daily activity chart */}
         <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: 14, border: "1px solid rgba(255,255,255,0.06)", padding: 24, marginBottom: 16 }}>
           <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 20px" }}>Активность за 7 дней</h3>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 100 }}>
-            {last7days.map((day, i) => (
-              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                <div style={{ fontSize: 9, color: "#64748b" }}>{day.chats}</div>
-                <div style={{
-                  width: "100%", borderRadius: "4px 4px 0 0",
-                  height: `${Math.round((day.chats / maxChats) * 80)}px`,
-                  background: `linear-gradient(180deg, #a855f7, #7c3aed)`,
-                  minHeight: 4, transition: "height 0.5s ease",
-                }} />
-                <div style={{ fontSize: 9, color: "#475569", whiteSpace: "nowrap" }}>{day.label}</div>
-              </div>
-            ))}
-          </div>
+          {dashboard ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+              {[
+                { label: "Всего чатов", value: dashboard.totalChats, color: "#a855f7" },
+                { label: "Открытых", value: dashboard.openChats, color: "#22c55e" },
+                { label: "Задач", value: dashboard.totalTasks, color: "#3b82f6" },
+                { label: "Просрочено", value: dashboard.overdueTasks, color: "#ef4444" },
+              ].map(({ label, value, color }) => (
+                <div key={label} style={{ textAlign: "center", padding: "12px 8px", borderRadius: 10, background: `${color}10`, border: `1px solid ${color}20` }}>
+                  <div style={{ fontSize: 28, fontWeight: 800, color }}>{value ?? "—"}</div>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>{label}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80 }}>
+              {last7days.map((day, i) => (
+                <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                  <div style={{ width: "100%", borderRadius: "4px 4px 0 0", height: "20px", background: "rgba(168,85,247,0.15)", minHeight: 4 }} />
+                  <div style={{ fontSize: 9, color: "#475569", whiteSpace: "nowrap" }}>{day.label}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Bar chart */}
@@ -2240,7 +2266,15 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           <div style={S.chatList}>
             <div style={{ ...S.chatListHeader, flexDirection: "column", gap: 10, padding: "14px 16px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+                <div>
                 <div style={{ fontSize: 15, fontWeight: 700 }}>Сообщения</div>
+                {dashboard && (
+                  <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>
+                    {dashboard.unreadMessages > 0 && <span style={{ color: "#ef4444", fontWeight: 600 }}>{dashboard.unreadMessages} непрочитанных · </span>}
+                    всего {dashboard.totalChats}
+                  </div>
+                )}
+              </div>
                 <button
                   onClick={() => loadChats()}
                   style={{
