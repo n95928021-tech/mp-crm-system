@@ -129,7 +129,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
       logger.info(`WB ${cabinet.name}: синхронизировано ${questions.length} вопросов`);
     } catch (error) {
-      logger.error(`WB ${cabinet.name} ошибка синхронизации:`, error.message);
+      logger.error(`WB ${cabinet.name} ошибка синхронизации: ${error.message} | response: ${JSON.stringify(error.response?.data)}`);
     }
   }
 
@@ -229,7 +229,7 @@ class OzonSyncService extends MarketplaceSyncService {
 
       logger.info(`Ozon ${cabinet.name}: синхронизировано ${chats.length} чатов`);
     } catch (error) {
-      logger.error(`Ozon ${cabinet.name} ошибка синхронизации:`, error.message);
+      logger.error(`Ozon ${cabinet.name} ошибка синхронизации: ${error.message} | status: ${error.response?.status} | response: ${JSON.stringify(error.response?.data)}`);
     }
   }
 
@@ -317,7 +317,7 @@ class YandexMarketSyncService extends MarketplaceSyncService {
 
       logger.info(`ЯМ ${cabinet.name}: синхронизировано ${chats.length} чатов`);
     } catch (error) {
-      logger.error(`ЯМ ${cabinet.name} ошибка синхронизации:`, error.message);
+      logger.error(`ЯМ ${cabinet.name} ошибка синхронизации: ${error.message} | response: ${JSON.stringify(error.response?.data)}`);
     }
   }
 

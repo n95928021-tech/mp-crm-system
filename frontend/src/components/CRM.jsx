@@ -1868,7 +1868,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                                       </div>
                                     </div>
                                     <div>
-                                      <label style={{ fontSize: 10, color: "#f59e0b", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>Client ID ЯМ</label>
+                                      <label style={{ fontSize: 10, color: "#f59e0b", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>Business ID ЯМ</label>
                                       <input style={{ ...S.input, fontSize: 12, padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
                                         value={vals.apiClientId} placeholder="12345678"
                                         onChange={(e) => startEdit("apiClientId", e.target.value)} />
@@ -2287,6 +2287,23 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   </div>
                 )}
               </div>
+                <button
+                  onClick={async () => {
+                    if (!apiUrl) return;
+                    try {
+                      await fetch(`${apiUrl}/sync/manual`, { method: "POST", headers: getHeaders() });
+                      setTimeout(() => loadChats(), 3000);
+                    } catch (e) {}
+                  }}
+                  style={{
+                    background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.15)",
+                    borderRadius: 6, padding: "4px 10px", color: "#22c55e", cursor: "pointer",
+                    fontSize: 11, fontFamily: "inherit", marginRight: 4,
+                  }}
+                  title="Синхронизировать с маркетплейсами"
+                >
+                  ↻ Синхронизировать
+                </button>
                 <button
                   onClick={() => loadChats()}
                   style={{

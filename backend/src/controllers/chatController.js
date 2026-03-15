@@ -114,11 +114,34 @@ exports.sendMessage = async (req, res, next) => {
     const { chatId } = req.params;
     const { text } = req.body;
 
-    const chat = await prisma.chat.findUnique({ where: { id: chatId } });
+    const chat = await prisma.chat.findUnique({
+      where: { id: chatId },
+      include: {
+        cabinet: { include: { marketplace: true } },
+      },
+    });
     if (!chat) {
       return res.status(404).json({ success: false, error: 'Чат не найден' });
     }
 
+    // ── Отправляем на маркетплейс (если есть externalChatId и ключи) ──
+    let marketplaceSent = false;
+    if (chat.externalChatId && chat.cabinet) {
+      try {
+        const { getSyncService } = require('../services/marketplaceSync');
+        const svc = getSyncService(chat.cabinet.marketplace.slug);
+        if (svc) {
+          marketplaceSent = await svc.sendMessage(chat.cabinet, chat.externalChatId, text);
+          if (!marketplaceSent) {
+            logger.warn(`Не удалось отправить на ${chat.cabinet.marketplace.slug}: чат ${chatId}`);
+          }
+        }
+      } catch (mpErr) {
+        logger.error(`Ошибка отправки на маркетплейс: ${mpErr.message}`);
+      }
+    }
+
+    // ── Сохраняем в БД ──
     const message = await prisma.chatMessage.create({
       data: {
         chatId,
@@ -127,13 +150,10 @@ exports.sendMessage = async (req, res, next) => {
         text,
       },
       include: {
-        sender: {
-          select: { id: true, firstName: true, lastName: true },
-        },
+        sender: { select: { id: true, firstName: true, lastName: true } },
       },
     });
 
-    // Обновляем чат
     await prisma.chat.update({
       where: { id: chatId },
       data: {
@@ -143,18 +163,13 @@ exports.sendMessage = async (req, res, next) => {
       },
     });
 
-    // WebSocket — отправляем уведомление (через req.app)
+    // ── WebSocket ──
     const io = req.app.get('io');
-    if (io) {
-      io.to(`chat:${chatId}`).emit('new_message', {
-        chatId,
-        message,
-      });
-    }
+    if (io) io.to(`chat:${chatId}`).emit('new_message', { chatId, message });
 
-    logger.info(`Сообщение отправлено в чат ${chatId}`, { userId: req.user.id });
+    logger.info(`Сообщение отправлено в чат ${chatId} (маркетплейс: ${marketplaceSent})`, { userId: req.user.id });
 
-    res.status(201).json({ success: true, data: message });
+    res.status(201).json({ success: true, data: message, marketplaceSent });
   } catch (error) {
     next(error);
   }

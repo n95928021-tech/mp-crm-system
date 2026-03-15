@@ -35,9 +35,8 @@ async function main() {
   const wbCabinets = [];
   const wbNames = ['WB Основной', 'WB Одежда', 'WB Электроника', 'WB Косметика', 'WB Дом и сад'];
   for (const name of wbNames) {
-    const cab = await prisma.cabinet.create({
-      data: { name, marketplaceId: wb.id },
-    });
+    const existing = await prisma.cabinet.findFirst({ where: { name, marketplaceId: wb.id } });
+    const cab = existing || await prisma.cabinet.create({ data: { name, marketplaceId: wb.id } });
     wbCabinets.push(cab);
   }
 
@@ -45,16 +44,14 @@ async function main() {
   const ozonCabinets = [];
   const ozonNames = ['Ozon Основной', 'Ozon Premium', 'Ozon Склад МСК', 'Ozon Склад СПБ'];
   for (const name of ozonNames) {
-    const cab = await prisma.cabinet.create({
-      data: { name, marketplaceId: ozon.id },
-    });
+    const existing = await prisma.cabinet.findFirst({ where: { name, marketplaceId: ozon.id } });
+    const cab = existing || await prisma.cabinet.create({ data: { name, marketplaceId: ozon.id } });
     ozonCabinets.push(cab);
   }
 
   // ─── Кабинет Яндекс (1 шт) ───
-  const ymCabinet = await prisma.cabinet.create({
-    data: { name: 'ЯМ Основной', marketplaceId: yandex.id },
-  });
+  const existingYm = await prisma.cabinet.findFirst({ where: { name: 'ЯМ Основной', marketplaceId: yandex.id } });
+  const ymCabinet = existingYm || await prisma.cabinet.create({ data: { name: 'ЯМ Основной', marketplaceId: yandex.id } });
 
   const allCabinets = [...wbCabinets, ...ozonCabinets, ymCabinet];
   console.log(`✅ Кабинеты созданы: ${allCabinets.length} шт`);

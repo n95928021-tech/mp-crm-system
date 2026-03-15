@@ -7,6 +7,7 @@ const chatController = require('../controllers/chatController');
 const taskController = require('../controllers/taskController');
 const analyticsController = require('../controllers/analyticsController');
 const marketplaceController = require('../controllers/marketplaceController');
+const notificationController = require('../controllers/notificationController');
 
 const router = express.Router();
 
@@ -25,6 +26,7 @@ router.get('/auth/me', authenticate, authController.getMe);
 // ─── Marketplaces & Cabinets ───
 router.get('/marketplaces', authenticate, marketplaceController.getMarketplaces);
 router.get('/cabinets/:cabinetId', authenticate, cabinetAccess, marketplaceController.getCabinetById);
+router.post('/cabinets', authenticate, authorize('ADMIN'), marketplaceController.createCabinet);
 router.put('/cabinets/:cabinetId', authenticate, authorize('ADMIN'), marketplaceController.updateCabinet);
 
 // ─── Chats ───
@@ -42,6 +44,23 @@ router.post('/tasks', authenticate, taskController.createTask);
 router.put('/tasks/:taskId', authenticate, taskController.updateTask);
 router.delete('/tasks/:taskId', authenticate, taskController.deleteTask);
 router.patch('/tasks/:taskId/toggle', authenticate, taskController.toggleTask);
+
+// ─── Notifications ───
+router.get('/notifications', authenticate, notificationController.getNotifications);
+router.patch('/notifications/read-all', authenticate, notificationController.markAllAsRead);
+router.patch('/notifications/:id/read', authenticate, notificationController.markAsRead);
+
+// ─── Sync (ручной запуск) ───
+router.post('/sync/manual', authenticate, authorize('ADMIN'), async (req, res) => {
+  try {
+    const { syncAllMarketplaces } = require('../services/marketplaceSync');
+    const io = req.app.get('io');
+    syncAllMarketplaces(io).catch(e => console.error('sync error:', e));
+    res.json({ success: true, message: 'Синхронизация запущена' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
 
 // ─── Analytics ───
 router.get('/analytics/response-time', authenticate, analyticsController.getResponseTimeAnalytics);
