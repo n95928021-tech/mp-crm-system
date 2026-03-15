@@ -606,6 +606,18 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     }
   }, [apiUrl]);
 
+  // ─── Загрузка дашборда ───
+  const loadDashboard = useCallback(async () => {
+    if (!apiUrl) return;
+    try {
+      const res = await fetch(`${apiUrl}/analytics/dashboard`, { headers: getHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setDashboard(data.data);
+      }
+    } catch (e) { console.error("Ошибка дашборда:", e); }
+  }, [apiUrl]);
+
   // ─── Загрузка аналитики из API ───
   const loadAnalytics = useCallback(async () => {
     if (!apiUrl) return;
