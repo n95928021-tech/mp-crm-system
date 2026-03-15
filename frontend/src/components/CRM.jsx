@@ -487,6 +487,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [cabinetSaving, setCabinetSaving] = useState(false);
   const [showApiKey, setShowApiKey] = useState({});
   const [settingsSaved, setSettingsSaved] = useState(null);
+  const [addingCabinet, setAddingCabinet] = useState(null);
+  const [newCabinetName, setNewCabinetName] = useState("");
+  const [cabinetAdding, setCabinetAdding] = useState(false);
+  const [expandedMp, setExpandedMp] = useState({}); // { mpId: true/false }
 
   // ─── Загрузка маркетплейсов и кабинетов из API ───
   const loadMarketplaces = useCallback(async () => {
@@ -502,9 +506,15 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           icon: MP_ICONS[mp.slug] || Icons.wb,
           color: mp.color || MP_COLORS[mp.slug] || "#6366f1",
           cabinets: (mp.cabinets || []).map((c) => ({
-            id: c.id,                     // UUID кабинета — используем как cabinetId
+            id: c.id,
             name: c.name,
             chatCount: c._count?.chats || 0,
+            lastSyncAt: c.lastSyncAt,
+            // API ключи — приходят только если пользователь ADMIN
+            apiToken: c.apiToken || "",
+            apiClientId: c.apiClientId || "",
+            apiKey: c.apiKey || "",
+            campaignId: c.campaignId || "",
           })),
         }));
         setMarketplaces(mapped);
@@ -894,7 +904,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       const byMarketplace = {};
       const byCabinet = {};
       (realAnalytics.byMarketplace || []).forEach((m) => {
-        byMarketplace[m.marketplaceId] = { name: m.marketplaceName, avg: m.avgResponseSec, count: m.count };
+        // Ищем маркетплейс по dbId или slug
+        const mpObj = marketplaces.find(mp => mp.dbId === m.marketplaceId || mp.id === m.marketplaceId);
+        const key = mpObj ? mpObj.id : m.marketplaceId;
+        byMarketplace[key] = { name: m.marketplaceName || mpObj?.name || key, avg: m.avgResponseSec, count: m.count };
       });
       (realAnalytics.byCabinet || []).forEach((c) => {
         byCabinet[c.cabinetId] = { name: c.cabinetName, avg: c.avgResponseSec, count: c.count };
@@ -1478,6 +1491,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           </div>
           {Object.entries(analyticsData.byMarketplace).map(([id, data]) => {
             const mp = getMarketplace(id);
+            if (!mp) return null;
             return (
               <div
                 key={id}
@@ -1545,6 +1559,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
             const pct = (data.avg / maxAvg) * 100;
             const mp = marketplaces.find((m) => m.cabinets.some((c) => c.id === id));
             const color = mp?.color || "#a855f7";
+            if (!color) return null;
             return (
               <div key={id} style={{ marginBottom: 14 }}>
                 <div
@@ -1616,6 +1631,34 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       }
     };
 
+    const createCabinet = async (mpDbId) => {
+      if (!newCabinetName.trim()) return;
+      setCabinetAdding(true);
+      try {
+        const res = await fetch(`${apiUrl}/cabinets`, {
+          method: "POST",
+          headers: getHeaders(),
+          body: JSON.stringify({ name: newCabinetName.trim(), marketplaceId: mpDbId }),
+        });
+        if (res.ok) {
+          setSettingsSaved("Кабинет добавлен!");
+          setTimeout(() => setSettingsSaved(null), 2500);
+          await loadMarketplaces();
+          setAddingCabinet(null);
+          setNewCabinetName("");
+        } else {
+          const err = await res.json();
+          setSettingsSaved("Ошибка: " + (err.error || "неизвестная"));
+          setTimeout(() => setSettingsSaved(null), 3000);
+        }
+      } catch (e) {
+        setSettingsSaved("Ошибка сети");
+        setTimeout(() => setSettingsSaved(null), 3000);
+      } finally {
+        setCabinetAdding(false);
+      }
+    };
+
     return (
       <div style={{ flex: 1, overflow: "auto", padding: 24 }}>
         {/* Header */}
@@ -1656,194 +1699,204 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
 
         {/* Cabinets tab */}
         {settingsTab === "cabinets" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {marketplaces.map((mp) => (
-              <div key={mp.id} style={{
-                background: "rgba(255,255,255,0.02)", borderRadius: 14,
-                border: "1px solid rgba(255,255,255,0.06)", overflow: "hidden",
-              }}>
-                {/* Marketplace header */}
-                <div style={{
-                  display: "flex", alignItems: "center", gap: 10,
-                  padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.04)",
-                  background: `linear-gradient(90deg, ${mp.color}10, transparent)`,
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {marketplaces.map((mp) => {
+              const isExpanded = expandedMp[mp.id] !== false;
+              const activeCabs = mp.cabinets.slice(0, 6);
+              const configuredCount = activeCabs.filter(c => c.apiToken || c.apiKey).length;
+              return (
+                <div key={mp.id} style={{
+                  background: "rgba(255,255,255,0.02)", borderRadius: 14,
+                  border: `1px solid ${isExpanded ? mp.color + "30" : "rgba(255,255,255,0.06)"}`,
+                  overflow: "hidden", transition: "border-color 0.2s",
                 }}>
-                  <span style={{ color: mp.color }}>{mp.icon()}</span>
-                  <span style={{ fontSize: 15, fontWeight: 700 }}>{mp.name}</span>
-                  <span style={{ fontSize: 11, color: "#475569", marginLeft: 4 }}>{mp.cabinets.length} кабинетов</span>
-                </div>
-                {/* Cabinets list */}
-                {mp.cabinets.map((cab) => (
-                  <div key={cab.id}>
-                    <div style={{
-                      display: "flex", alignItems: "center", gap: 12,
-                      padding: "12px 20px",
-                      borderBottom: "1px solid rgba(255,255,255,0.03)",
-                      background: editingCabinet === cab.id ? "rgba(168,85,247,0.04)" : "transparent",
-                    }}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{cab.name}</div>
-                        <div style={{ fontSize: 10, color: "#334155", fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>
-                          ID: {cab.id}
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{
-                          fontSize: 10, padding: "2px 8px", borderRadius: 5, fontWeight: 600,
-                          background: cab.chatCount > 0 ? "rgba(34,197,94,0.12)" : "rgba(255,255,255,0.04)",
-                          color: cab.chatCount > 0 ? "#22c55e" : "#475569",
-                        }}>
-                          {cab.chatCount} чатов
-                        </span>
-                        <button
-                          onClick={() => {
-                            if (editingCabinet === cab.id) {
-                              setEditingCabinet(null);
-                              setCabinetForm({});
-                            } else {
-                              setEditingCabinet(cab.id);
-                              setCabinetForm({ name: cab.name });
-                            }
-                          }}
-                          style={{
-                            ...S.btn(editingCabinet === cab.id ? "#64748b" : "#a855f7"),
-                            padding: "5px 12px", fontSize: 11,
-                          }}
-                        >
-                          {editingCabinet === cab.id ? "Отмена" : "Настроить"}
-                        </button>
-                      </div>
-                    </div>
-                    {/* Edit form */}
-                    {editingCabinet === cab.id && (
-                      <div style={{
-                        padding: "16px 20px 20px",
-                        background: "rgba(168,85,247,0.03)",
-                        borderBottom: "1px solid rgba(255,255,255,0.04)",
-                      }}>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
-                          <div>
-                            <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
-                              Название кабинета
-                            </label>
-                            <input
-                              style={S.input}
-                              value={cabinetForm.name || ""}
-                              onChange={(e) => setCabinetForm({ ...cabinetForm, name: e.target.value })}
-                              placeholder="Название"
-                            />
-                          </div>
-                          {mp.id === "wb" && (
-                            <div>
-                              <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
-                                API Token (Wildberries)
-                              </label>
-                              <div style={{ position: "relative" }}>
-                                <input
-                                  style={{ ...S.input, paddingRight: 36, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}
-                                  type={showApiKey[cab.id] ? "text" : "password"}
-                                  value={cabinetForm.apiToken || ""}
-                                  onChange={(e) => setCabinetForm({ ...cabinetForm, apiToken: e.target.value })}
-                                  placeholder="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
-                                />
-                                <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id]: !p[cab.id] }))} style={{
-                                  position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
-                                  background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2,
-                                }}>
-                                  {showApiKey[cab.id] ? Icons.eyeOff() : Icons.eye()}
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                          {mp.id === "ozon" && (
-                            <>
-                              <div>
-                                <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
-                                  Client ID (Ozon)
-                                </label>
-                                <input
-                                  style={S.input}
-                                  value={cabinetForm.apiClientId || ""}
-                                  onChange={(e) => setCabinetForm({ ...cabinetForm, apiClientId: e.target.value })}
-                                  placeholder="123456"
-                                />
-                              </div>
-                              <div>
-                                <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
-                                  API Key (Ozon)
-                                </label>
-                                <div style={{ position: "relative" }}>
-                                  <input
-                                    style={{ ...S.input, paddingRight: 36, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}
-                                    type={showApiKey[cab.id + "_key"] ? "text" : "password"}
-                                    value={cabinetForm.apiKey || ""}
-                                    onChange={(e) => setCabinetForm({ ...cabinetForm, apiKey: e.target.value })}
-                                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                                  />
-                                  <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id + "_key"]: !p[cab.id + "_key"] }))} style={{
-                                    position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
-                                    background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2,
-                                  }}>
-                                    {showApiKey[cab.id + "_key"] ? Icons.eyeOff() : Icons.eye()}
-                                  </button>
-                                </div>
-                              </div>
-                            </>
-                          )}
-                          {mp.id === "yandex" && (
-                            <>
-                              <div>
-                                <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
-                                  OAuth Token (Яндекс)
-                                </label>
-                                <div style={{ position: "relative" }}>
-                                  <input
-                                    style={{ ...S.input, paddingRight: 36, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}
-                                    type={showApiKey[cab.id] ? "text" : "password"}
-                                    value={cabinetForm.apiToken || ""}
-                                    onChange={(e) => setCabinetForm({ ...cabinetForm, apiToken: e.target.value })}
-                                    placeholder="y0_AgAAAA..."
-                                  />
-                                  <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id]: !p[cab.id] }))} style={{
-                                    position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
-                                    background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2,
-                                  }}>
-                                    {showApiKey[cab.id] ? Icons.eyeOff() : Icons.eye()}
-                                  </button>
-                                </div>
-                              </div>
-                              <div>
-                                <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 5, fontWeight: 500 }}>
-                                  Campaign ID
-                                </label>
-                                <input
-                                  style={S.input}
-                                  value={cabinetForm.campaignId || ""}
-                                  onChange={(e) => setCabinetForm({ ...cabinetForm, campaignId: e.target.value })}
-                                  placeholder="12345678"
-                                />
-                              </div>
-                            </>
-                          )}
-                        </div>
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <button
-                            onClick={saveCabinet}
-                            disabled={cabinetSaving}
-                            style={{ ...S.btn("#a855f7"), opacity: cabinetSaving ? 0.6 : 1 }}
-                          >
-                            {cabinetSaving ? "Сохранение..." : "💾 Сохранить"}
-                          </button>
-                          <button onClick={() => { setEditingCabinet(null); setCabinetForm({}); }} style={S.btn("#475569")}>
-                            Отмена
-                          </button>
-                        </div>
-                      </div>
-                    )}
+
+                  {/* ── Уровень 1: Заголовок маркетплейса ── */}
+                  <div onClick={() => setExpandedMp(p => ({ ...p, [mp.id]: !isExpanded }))} style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "16px 20px",
+                    cursor: "pointer", userSelect: "none",
+                    background: `linear-gradient(90deg, ${mp.color}${isExpanded ? "15" : "08"}, transparent)`,
+                    borderBottom: isExpanded ? "1px solid rgba(255,255,255,0.06)" : "none",
+                  }}>
+                    <span style={{ color: mp.color }}>{mp.icon()}</span>
+                    <span style={{ fontSize: 15, fontWeight: 700 }}>{mp.name}</span>
+                    <span style={{ fontSize: 11, color: "#475569" }}>{activeCabs.length}/6 кабинетов</span>
+                    <span style={{
+                      fontSize: 10, padding: "2px 8px", borderRadius: 5, fontWeight: 600,
+                      background: configuredCount > 0 ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.08)",
+                      color: configuredCount > 0 ? "#22c55e" : "#64748b",
+                    }}>{configuredCount}/{activeCabs.length} API ✓</span>
+                    <span style={{ marginLeft: "auto", fontSize: 18, color: "#475569", transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>▾</span>
                   </div>
-                ))}
-              </div>
-            ))}
+
+                  {/* ── Уровень 2: Список кабинетов ── */}
+                  {isExpanded && (
+                    <>
+                      {activeCabs.map((cab) => {
+                        const cabExpanded = expandedMp["cab_" + cab.id] !== false;
+                        const isEditing = editingCabinet === cab.id;
+                        const startEdit = (field, val) => {
+                          if (!isEditing) {
+                            setEditingCabinet(cab.id);
+                            setCabinetForm({ name: cab.name, apiToken: cab.apiToken||"", apiClientId: cab.apiClientId||"", apiKey: cab.apiKey||"", campaignId: cab.campaignId||"" });
+                          }
+                          setCabinetForm(p => ({ ...p, [field]: val }));
+                        };
+                        const vals = isEditing ? cabinetForm : { name: cab.name, apiToken: cab.apiToken||"", apiClientId: cab.apiClientId||"", apiKey: cab.apiKey||"", campaignId: cab.campaignId||"" };
+
+                        return (
+                          <div key={cab.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+
+                            {/* Строка кабинета — кликабельна */}
+                            <div onClick={() => setExpandedMp(p => ({ ...p, ["cab_" + cab.id]: !cabExpanded }))}
+                              style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 20px 11px 28px", cursor: "pointer", userSelect: "none", background: cabExpanded ? "rgba(255,255,255,0.02)" : "transparent" }}>
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: (cab.apiToken || cab.apiKey) ? "#22c55e" : "#475569" }} />
+                              <span style={{ fontSize: 13, fontWeight: 500, color: cabExpanded ? "#e2e8f0" : "#94a3b8", flex: 1 }}>{cab.name}</span>
+                              {cab.chatCount > 0 && <span style={{ fontSize: 10, color: "#64748b" }}>{cab.chatCount} чатов</span>}
+                              {cab.lastSyncAt && <span style={{ fontSize: 10, color: "#334155" }}>↻ {new Date(cab.lastSyncAt).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>}
+                              <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, fontWeight: 700,
+                                background: (cab.apiToken || cab.apiKey) ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.08)",
+                                color: (cab.apiToken || cab.apiKey) ? "#22c55e" : "#ef4444" }}>
+                                {(cab.apiToken || cab.apiKey) ? "✓ API" : "нет API"}
+                              </span>
+                              <span style={{ color: "#334155", fontSize: 14, transform: cabExpanded ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>▾</span>
+                            </div>
+
+                            {/* Поля API — раскрываются при клике, только ADMIN */}
+                            {cabExpanded && user?.role === "ADMIN" && (
+                              <div style={{ padding: "14px 20px 16px 28px", background: "rgba(168,85,247,0.03)", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+
+                                  {/* Название кабинета — для всех МП */}
+                                  <div>
+                                    <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>Название кабинета</label>
+                                    <input style={{ ...S.input, fontSize: 12, padding: "8px 10px" }}
+                                      value={vals.name} onChange={(e) => startEdit("name", e.target.value)} />
+                                  </div>
+
+                                  {/* WB: API Токен */}
+                                  {mp.id === "wb" && (
+                                    <div>
+                                      <label style={{ fontSize: 10, color: "#a855f7", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>API Токен WB</label>
+                                      <div style={{ position: "relative" }}>
+                                        <input style={{ ...S.input, fontSize: 11, padding: "8px 32px 8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
+                                          type={showApiKey[cab.id] ? "text" : "password"}
+                                          value={vals.apiToken} placeholder="eyJhbGciOiJSUzI1NiI..."
+                                          onChange={(e) => startEdit("apiToken", e.target.value)} />
+                                        <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id]: !p[cab.id] }))}
+                                          style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2 }}>
+                                          {showApiKey[cab.id] ? Icons.eyeOff() : Icons.eye()}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Ozon: Client ID + API Key */}
+                                  {mp.id === "ozon" && (<>
+                                    <div>
+                                      <label style={{ fontSize: 10, color: "#3b82f6", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>Client ID</label>
+                                      <input style={{ ...S.input, fontSize: 12, padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
+                                        value={vals.apiClientId} placeholder="2574067"
+                                        onChange={(e) => startEdit("apiClientId", e.target.value)} />
+                                    </div>
+                                    <div>
+                                      <label style={{ fontSize: 10, color: "#3b82f6", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>API Key</label>
+                                      <div style={{ position: "relative" }}>
+                                        <input style={{ ...S.input, fontSize: 11, padding: "8px 32px 8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
+                                          type={showApiKey[cab.id] ? "text" : "password"}
+                                          value={vals.apiKey} placeholder="84e31f47-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                          onChange={(e) => startEdit("apiKey", e.target.value)} />
+                                        <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id]: !p[cab.id] }))}
+                                          style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2 }}>
+                                          {showApiKey[cab.id] ? Icons.eyeOff() : Icons.eye()}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </>)}
+
+                                  {/* Яндекс Маркет: API Токен + Client ID */}
+                                  {mp.id === "yandex" && (<>
+                                    <div>
+                                      <label style={{ fontSize: 10, color: "#f59e0b", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>OAuth Токен ЯМ</label>
+                                      <div style={{ position: "relative" }}>
+                                        <input style={{ ...S.input, fontSize: 11, padding: "8px 32px 8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
+                                          type={showApiKey[cab.id] ? "text" : "password"}
+                                          value={vals.apiToken} placeholder="y0_AgAAAA..."
+                                          onChange={(e) => startEdit("apiToken", e.target.value)} />
+                                        <button onClick={() => setShowApiKey(p => ({ ...p, [cab.id]: !p[cab.id] }))}
+                                          style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#64748b", cursor: "pointer", padding: 2 }}>
+                                          {showApiKey[cab.id] ? Icons.eyeOff() : Icons.eye()}
+                                        </button>
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <label style={{ fontSize: 10, color: "#f59e0b", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>Client ID ЯМ</label>
+                                      <input style={{ ...S.input, fontSize: 12, padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
+                                        value={vals.apiClientId} placeholder="12345678"
+                                        onChange={(e) => startEdit("apiClientId", e.target.value)} />
+                                    </div>
+                                  </>)}
+
+                                  {/* Кнопки сохранить/отмена */}
+                                  {isEditing && (
+                                    <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8, marginTop: 6 }}>
+                                      <button onClick={saveCabinet} disabled={cabinetSaving}
+                                        style={{ ...S.btn("#a855f7"), fontSize: 12, padding: "8px 20px", opacity: cabinetSaving ? 0.6 : 1 }}>
+                                        {cabinetSaving ? "Сохранение..." : "💾 Сохранить"}
+                                      </button>
+                                      <button onClick={() => { setEditingCabinet(null); setCabinetForm({}); }}
+                                        style={{ ...S.btn("#475569"), fontSize: 12, padding: "8px 16px" }}>
+                                        Отмена
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      {/* Добавить кабинет — ADMIN, лимит 6 */}
+                      {user?.role === "ADMIN" && activeCabs.length < 6 && (
+                        <div style={{ padding: "10px 20px 14px" }}>
+                          {addingCabinet === mp.id ? (
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <input style={{ ...S.input, flex: 1, fontSize: 12, padding: "8px 12px" }}
+                                placeholder={"Название кабинета " + mp.name}
+                                value={newCabinetName}
+                                onChange={(e) => setNewCabinetName(e.target.value)}
+                                onKeyDown={(e) => e.key === "Enter" && createCabinet(mp.dbId)}
+                                autoFocus />
+                              <button onClick={() => createCabinet(mp.dbId)} disabled={cabinetAdding || !newCabinetName.trim()}
+                                style={{ ...S.btn("#22c55e"), padding: "8px 16px", fontSize: 12, opacity: cabinetAdding ? 0.6 : 1 }}>
+                                {cabinetAdding ? "..." : "Создать"}
+                              </button>
+                              <button onClick={() => { setAddingCabinet(null); setNewCabinetName(""); }}
+                                style={{ ...S.btn("#475569"), padding: "8px 12px", fontSize: 12 }}>✕</button>
+                            </div>
+                          ) : (
+                            <button onClick={() => setAddingCabinet(mp.id)} style={{
+                              display: "flex", alignItems: "center", gap: 6, background: "none",
+                              border: "1px dashed rgba(255,255,255,0.1)", borderRadius: 8,
+                              padding: "8px 14px", color: "#475569", fontSize: 12,
+                              cursor: "pointer", fontFamily: "inherit", width: "100%", justifyContent: "center",
+                            }}>
+                              {Icons.plus()} Добавить кабинет ({activeCabs.length}/6)
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {user?.role === "ADMIN" && activeCabs.length >= 6 && (
+                        <div style={{ padding: "8px 20px", fontSize: 11, color: "#475569", textAlign: "center" }}>
+                          Лимит достигнут (6/6)
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -2508,11 +2561,8 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                         const lines = currentChat.messages.map(m =>
                           `[${new Date(m.time).toLocaleString("ru-RU")}] ${m.from === "manager" ? "Менеджер" : currentChat.customerName}: ${m.text}`
                         );
-                        const text = `Чат с ${currentChat.customerName}
-${getCabinet(currentChat.cabinetId)?.name || ""}
-${"─".repeat(40)}
-${lines.join("
-")}`;
+                        const nl = "\n";
+                        const text = `Чат с ${currentChat.customerName}${nl}${getCabinet(currentChat.cabinetId)?.name || ""}${nl}${"─".repeat(40)}${nl}${lines.join(nl)}`;
                         const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement("a");
