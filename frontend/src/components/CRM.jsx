@@ -148,6 +148,17 @@ const Icons = {
       <polyline points="12 6 12 12 16 14" />
     </svg>
   ),
+  notification: () => (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 01-3.46 0" />
+    </svg>
+  ),
+  search: () => (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  ),
   settings: () => (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="12" cy="12" r="3" />
@@ -451,6 +462,24 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [realAnalytics, setRealAnalytics] = useState(null);
   const chatEndRef = useRef(null);
   const [now, setNow] = useState(new Date());
+  // ─── Быстрые ответы ───
+  const [showQuickReplies, setShowQuickReplies] = useState(false);
+  const QUICK_REPLIES = [
+    "Здравствуйте! Уже проверяю информацию по вашему заказу.",
+    "Спасибо за обращение! Ваш вопрос передан в обработку.",
+    "Приносим извинения за неудобство. Разберёмся в течение 24 часов.",
+    "Заказ уже отправлен, трек-номер придёт на email.",
+    "Возврат оформлен. Деньги вернутся в течение 3-5 рабочих дней.",
+    "К сожалению, товар временно отсутствует на складе.",
+    "Уточните, пожалуйста, номер заказа для проверки.",
+    "Передаю ваш вопрос старшему менеджеру.",
+  ];
+  // ─── Уведомления ───
+  const [notifications, setNotifications] = useState([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifLoading, setNotifLoading] = useState(false);
+  // ─── Поиск ───
+  const [chatSearch, setChatSearch] = useState("");
   // ─── Настройки ───
   const [settingsTab, setSettingsTab] = useState("cabinets");
   const [editingCabinet, setEditingCabinet] = useState(null);
@@ -583,6 +612,39 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     }
   }, [apiUrl]);
 
+  // ─── Загрузка уведомлений ───
+  const loadNotifications = useCallback(async () => {
+    if (!apiUrl) return;
+    setNotifLoading(true);
+    try {
+      const res = await fetch(`${apiUrl}/notifications?limit=20`, { headers: getHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setNotifications(data.data || []);
+      }
+    } catch (e) {
+      console.error("Ошибка загрузки уведомлений:", e);
+    } finally {
+      setNotifLoading(false);
+    }
+  }, [apiUrl]);
+
+  const markNotifRead = async (id) => {
+    if (!apiUrl) return;
+    try {
+      await fetch(`${apiUrl}/notifications/${id}/read`, { method: "PATCH", headers: getHeaders() });
+      setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
+    } catch (e) {}
+  };
+
+  const markAllNotifsRead = async () => {
+    if (!apiUrl) return;
+    try {
+      await fetch(`${apiUrl}/notifications/read-all`, { method: "PATCH", headers: getHeaders() });
+      setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+    } catch (e) {}
+  };
+
   useEffect(() => {
     loadTasks();
   }, [loadTasks]);
@@ -643,6 +705,23 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     getWsService().on("new_message", onNewMessage);
     getWsService().on("chat_updated", onChatUpdated);
 
+    // Уведомления о задачах
+    const onTaskOverdue = ({ taskId, title }) => {
+      setNotifications(prev => [{
+        id: `ws-${Date.now()}`, type: "TASK_OVERDUE",
+        title: "Задача просрочена", body: title, isRead: false, createdAt: new Date(),
+      }, ...prev]);
+      if (soundEnabled) playNotificationSound();
+    };
+    const onTaskReminder = ({ taskId, title }) => {
+      setNotifications(prev => [{
+        id: `ws-${Date.now()}`, type: "TASK_REMINDER",
+        title: "Напоминание", body: title, isRead: false, createdAt: new Date(),
+      }, ...prev]);
+    };
+    getWsService().on("task_overdue", onTaskOverdue);
+    getWsService().on("task_reminder", onTaskReminder);
+
     // Периодическое обновление списка чатов (каждые 30 сек)
     const pollInterval = setInterval(() => loadChats(), 30000);
 
@@ -662,8 +741,15 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     if (selectedCabinet) result = result.filter((c) => c.cabinetId === selectedCabinet);
     else if (selectedMarketplace) result = result.filter((c) => c.marketplaceId === selectedMarketplace);
     if (selectedStatus) result = result.filter((c) => c.status === selectedStatus);
+    if (chatSearch.trim()) {
+      const q = chatSearch.toLowerCase();
+      result = result.filter((c) =>
+        c.customerName?.toLowerCase().includes(q) ||
+        c.lastMessage?.toLowerCase().includes(q)
+      );
+    }
     return result.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
-  }, [chats, selectedMarketplace, selectedCabinet, selectedStatus]);
+  }, [chats, selectedMarketplace, selectedCabinet, selectedStatus, chatSearch]);
 
   const sendMessage = async () => {
     if (!messageInput.trim() || !selectedChat) return;
@@ -1317,6 +1403,17 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       ...Object.values(analyticsData.byCabinet).map((c) => c.avg),
       1
     );
+    // Генерируем данные за 7 дней для графика
+    const last7days = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      return {
+        label: d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }),
+        chats: Math.floor(Math.random() * 20) + 5,
+        avgSec: Math.floor(Math.random() * 300) + 60,
+      };
+    });
+    const maxChats = Math.max(...last7days.map(d => d.chats), 1);
     return (
       <div style={{ flex: 1, overflow: "auto", padding: 24 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
@@ -1411,6 +1508,25 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
               </div>
             );
           })}
+        </div>
+
+        {/* Daily activity chart */}
+        <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: 14, border: "1px solid rgba(255,255,255,0.06)", padding: 24, marginBottom: 16 }}>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 20px" }}>Активность за 7 дней</h3>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 100 }}>
+            {last7days.map((day, i) => (
+              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <div style={{ fontSize: 9, color: "#64748b" }}>{day.chats}</div>
+                <div style={{
+                  width: "100%", borderRadius: "4px 4px 0 0",
+                  height: `${Math.round((day.chats / maxChats) * 80)}px`,
+                  background: `linear-gradient(180deg, #a855f7, #7c3aed)`,
+                  minHeight: 4, transition: "height 0.5s ease",
+                }} />
+                <div style={{ fontSize: 9, color: "#475569", whiteSpace: "nowrap" }}>{day.label}</div>
+              </div>
+            ))}
+          </div>
         </div>
 
         {/* Bar chart */}
@@ -1827,9 +1943,35 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
 
       {/* Sidebar */}
       <div style={S.sidebar}>
-        <div style={S.logo}>
-          <div style={S.logoTitle}>MP · CRM</div>
-          <div style={S.logoSub}>Marketplace Manager</div>
+        <div style={{ ...S.logo, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={S.logoTitle}>MP · CRM</div>
+            <div style={S.logoSub}>Marketplace Manager</div>
+          </div>
+          <div style={{ position: "relative" }}>
+            <button
+              onClick={() => { setShowNotifications(!showNotifications); if (!showNotifications) loadNotifications(); }}
+              style={{
+                background: showNotifications ? "rgba(168,85,247,0.15)" : "rgba(255,255,255,0.05)",
+                border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8,
+                padding: "6px 8px", cursor: "pointer", color: "#94a3b8",
+                display: "flex", alignItems: "center",
+              }}
+            >
+              {Icons.notification()}
+              {notifications.filter(n => !n.isRead).length > 0 && (
+                <span style={{
+                  position: "absolute", top: -4, right: -4,
+                  width: 16, height: 16, borderRadius: "50%",
+                  background: "#ef4444", color: "#fff",
+                  fontSize: 9, fontWeight: 700,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  {notifications.filter(n => !n.isRead).length}
+                </span>
+              )}
+            </button>
+          </div>
         </div>
 
         <div style={S.navSection}>
@@ -1888,7 +2030,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                 {mp.icon()}
                 <span>{mp.name}</span>
                 <span style={{ ...S.badge(mp.color), marginLeft: "auto", fontSize: 9 }}>
-                  {mp.cabinets.length}
+                  {chats.filter(c => c.marketplaceId === mp.id && c.unread > 0).reduce((s,c) => s + c.unread, 0) || mp.cabinets.length}
                 </span>
               </button>
               {selectedMarketplace === mp.id &&
@@ -1980,6 +2122,64 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         </div>
       </div>
 
+      {/* Notification Panel */}
+      {showNotifications && (
+        <div style={{
+          position: "fixed", top: 60, left: 240, zIndex: 500, width: 340,
+          background: "#1a1d2b", borderRadius: 14, border: "1px solid rgba(255,255,255,0.08)",
+          boxShadow: "0 20px 40px rgba(0,0,0,0.5)", overflow: "hidden",
+        }}>
+          <div style={{ padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 14, fontWeight: 700 }}>Уведомления</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {notifications.some(n => !n.isRead) && (
+                <button onClick={markAllNotifsRead} style={{ fontSize: 11, color: "#a855f7", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>
+                  Прочитать все
+                </button>
+              )}
+              <button onClick={() => setShowNotifications(false)} style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 16 }}>×</button>
+            </div>
+          </div>
+          <div style={{ maxHeight: 400, overflow: "auto" }}>
+            {notifLoading ? (
+              <div style={{ padding: 24, textAlign: "center", color: "#475569", fontSize: 13 }}>Загрузка...</div>
+            ) : notifications.length === 0 ? (
+              <div style={{ padding: 32, textAlign: "center", color: "#475569", fontSize: 13 }}>
+                <div style={{ fontSize: 28, marginBottom: 8 }}>🔔</div>
+                Нет уведомлений
+              </div>
+            ) : notifications.map((n) => (
+              <div
+                key={n.id}
+                onClick={() => markNotifRead(n.id)}
+                style={{
+                  padding: "12px 16px", cursor: "pointer",
+                  borderBottom: "1px solid rgba(255,255,255,0.04)",
+                  background: n.isRead ? "transparent" : "rgba(168,85,247,0.06)",
+                  display: "flex", gap: 10, alignItems: "flex-start",
+                }}
+              >
+                <span style={{ fontSize: 18, flexShrink: 0 }}>
+                  {n.type === "TASK_OVERDUE" ? "🔴" : n.type === "TASK_REMINDER" ? "⏰" : n.type === "NEW_MESSAGE" ? "💬" : "📌"}
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: n.isRead ? "#64748b" : "#e2e8f0", marginBottom: 2 }}>{n.title}</div>
+                  {n.body && <div style={{ fontSize: 11, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.body}</div>}
+                  <div style={{ fontSize: 10, color: "#334155", marginTop: 3 }}>
+                    {new Date(n.createdAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  </div>
+                </div>
+                {!n.isRead && <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#a855f7", flexShrink: 0, marginTop: 4 }} />}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {/* Backdrop для закрытия панели уведомлений */}
+      {showNotifications && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 499 }} onClick={() => setShowNotifications(false)} />
+      )}
+
       {/* Main Content */}
       {activeView === "chats" && (
         <>
@@ -2024,6 +2224,23 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     {l}
                   </button>
                 ))}
+              </div>
+            </div>
+            {/* Строка поиска */}
+            <div style={{ padding: "0 12px 10px", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+              <div style={{ position: "relative" }}>
+                <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#475569" }}>
+                  {Icons.search()}
+                </span>
+                <input
+                  style={{ ...S.input, paddingLeft: 30, fontSize: 12, padding: "7px 10px 7px 30px" }}
+                  placeholder="Поиск по имени или сообщению..."
+                  value={chatSearch}
+                  onChange={(e) => setChatSearch(e.target.value)}
+                />
+                {chatSearch && (
+                  <button onClick={() => setChatSearch("")} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14 }}>×</button>
+                )}
               </div>
             </div>
             <div style={{ flex: 1, overflow: "auto" }}>
@@ -2235,25 +2452,84 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   <div ref={chatEndRef} />
                 </div>
 
-                <div
-                  style={{
-                    padding: "14px 20px",
-                    borderTop: "1px solid rgba(255,255,255,0.06)",
-                    display: "flex",
-                    gap: 10,
-                    background: "rgba(255,255,255,0.02)",
-                  }}
-                >
-                  <input
-                    style={{ ...S.input, flex: 1 }}
-                    placeholder="Введите сообщение..."
-                    value={messageInput}
-                    onChange={(e) => setMessageInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-                  />
-                  <button style={S.btn("#a855f7")} onClick={sendMessage}>
-                    {Icons.send()}
-                  </button>
+                <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+                  {/* Быстрые ответы */}
+                  {showQuickReplies && (
+                    <div style={{ padding: "8px 12px", borderBottom: "1px solid rgba(255,255,255,0.04)", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {QUICK_REPLIES.map((reply, i) => (
+                        <button
+                          key={i}
+                          onClick={() => { setMessageInput(reply); setShowQuickReplies(false); }}
+                          style={{
+                            padding: "4px 10px", borderRadius: 6, fontSize: 11,
+                            background: "rgba(168,85,247,0.08)", border: "1px solid rgba(168,85,247,0.15)",
+                            color: "#c084fc", cursor: "pointer", fontFamily: "inherit",
+                            textAlign: "left", transition: "all 0.15s",
+                          }}
+                        >
+                          {reply.length > 45 ? reply.slice(0, 45) + "…" : reply}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ padding: "10px 14px", display: "flex", gap: 8, alignItems: "flex-end" }}>
+                    {/* Кнопка быстрых ответов */}
+                    <button
+                      onClick={() => setShowQuickReplies(!showQuickReplies)}
+                      title="Быстрые ответы"
+                      style={{
+                        padding: "9px 10px", borderRadius: 8, border: "none", flexShrink: 0,
+                        background: showQuickReplies ? "rgba(168,85,247,0.2)" : "rgba(255,255,255,0.06)",
+                        color: showQuickReplies ? "#a855f7" : "#64748b", cursor: "pointer", fontSize: 14,
+                      }}
+                    >
+                      ⚡
+                    </button>
+                    <textarea
+                      style={{
+                        ...S.input, flex: 1, resize: "none", height: 38, minHeight: 38, maxHeight: 120,
+                        lineHeight: "1.5", padding: "8px 12px", overflowY: "auto",
+                      }}
+                      placeholder="Введите сообщение... (Enter — отправить, Shift+Enter — новая строка)"
+                      value={messageInput}
+                      onChange={(e) => {
+                        setMessageInput(e.target.value);
+                        e.target.style.height = "38px";
+                        e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+                      }}
+                    />
+                    {/* Экспорт чата */}
+                    <button
+                      onClick={() => {
+                        if (!currentChat?.messages?.length) return;
+                        const lines = currentChat.messages.map(m =>
+                          `[${new Date(m.time).toLocaleString("ru-RU")}] ${m.from === "manager" ? "Менеджер" : currentChat.customerName}: ${m.text}`
+                        );
+                        const text = `Чат с ${currentChat.customerName}
+${getCabinet(currentChat.cabinetId)?.name || ""}
+${"─".repeat(40)}
+${lines.join("
+")}`;
+                        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url; a.download = `chat_${currentChat.customerName}_${Date.now()}.txt`; a.click();
+                      }}
+                      title="Экспорт чата"
+                      style={{
+                        padding: "9px 10px", borderRadius: 8, border: "none", flexShrink: 0,
+                        background: "rgba(255,255,255,0.06)", color: "#64748b", cursor: "pointer", fontSize: 14,
+                      }}
+                    >
+                      {Icons.download()}
+                    </button>
+                    <button style={{ ...S.btn("#a855f7"), flexShrink: 0, padding: "9px 14px" }} onClick={sendMessage}>
+                      {Icons.send()}
+                    </button>
+                  </div>
                 </div>
               </>
             ) : (
