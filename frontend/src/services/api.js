@@ -4,7 +4,7 @@
 
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000/api/v1';
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000/api/v1';
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -42,7 +42,7 @@ api.interceptors.response.use(
       } catch (refreshError) {
         localStorage.removeItem('accessToken');
         localStorage.removeItem('refreshToken');
-        window.location.href = '/login';
+        window.location.href = '/';
         return Promise.reject(refreshError);
       }
     }

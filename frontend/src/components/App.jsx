@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import CRM from './CRM.jsx';
-
-const API = 'http://localhost:4000/api/v1';
+import { authAPI, API_BASE } from '../services/api.js';
 
 const getHeaders = () => ({
   'Content-Type': 'application/json',
@@ -14,12 +13,8 @@ export default function App({ onLogout }) {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    // Загружаем профиль пользователя
-    fetch(`${API}/auth/me`, { headers: getHeaders() })
-      .then((res) => {
-        if (!res.ok) throw new Error('Unauthorized');
-        return res.json();
-      })
+    authAPI.getMe()
+      .then((res) => res.data)
       .then((data) => {
         setUser(data.data);
         setLoading(false);
@@ -30,7 +25,7 @@ export default function App({ onLogout }) {
         setLoading(false);
         onLogout();
       });
-  }, []);
+  }, [onLogout]);
 
   if (loading) {
     return (
@@ -54,7 +49,5 @@ export default function App({ onLogout }) {
     );
   }
 
-  // CRM компонент пока работает на демо-данных
-  // В следующем обновлении подключим к реальным API
-  return <CRM user={user} onLogout={onLogout} apiUrl={API} getHeaders={getHeaders} />;
+  return <CRM user={user} onLogout={onLogout} apiUrl={API_BASE} getHeaders={getHeaders} />;
 }

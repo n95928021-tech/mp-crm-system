@@ -82,6 +82,13 @@ const Icons = {
       <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
     </svg>
   ),
+  question: () => (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.1 9a3 3 0 115.8 1c0 2-3 2-3 4" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  ),
   calendar: () => (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
       <rect x="3" y="4" width="18" height="18" rx="2" />
@@ -259,6 +266,7 @@ const TimerBar = ({ lastMessageTime }) => {
 const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badge }) => {
   const mp = mpProp || { color: "#6366f1", name: "—" }; // fallback если маркетплейс ещё не загружен
   const [elapsed, setElapsed] = useState(0);
+  const hasUnread = (chat.unread || 0) > 0;
 
   useEffect(() => {
     const update = () => setElapsed(Math.floor((Date.now() - new Date(chat.lastMessageTime).getTime()) / 1000));
@@ -282,6 +290,8 @@ const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badg
   const m = Math.floor(elapsed / 60);
   const s = elapsed % 60;
   const timeStr = `${m}:${s.toString().padStart(2, "0")}`;
+  const displayName = chat.customerName || "Диалог";
+  const avatarLetter = displayName[0] || "D";
 
   return (
     <div
@@ -306,13 +316,13 @@ const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badg
           display: "flex", alignItems: "center", justifyContent: "center",
           color: mp.color, fontSize: 15, fontWeight: 700, flexShrink: 0, alignSelf: "center",
         }}>
-          {chat.customerName[0]}
+          {avatarLetter}
         </div>
         {/* Контент */}
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {chat.customerName}
+              {displayName}
             </span>
             {chat.unread > 0 && <span style={badge(mp.color)}>{chat.unread}</span>}
           </div>
@@ -335,41 +345,42 @@ const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badg
         </div>
       </div>
 
-      {/* Правая часть — градиентная полоска таймера на всю высоту */}
-      <div style={{
-        width: 62,
-        flexShrink: 0,
-        background: stripGradient,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        position: "relative",
-        transition: "background 1.5s ease",
-      }}>
-        {/* Затемнение слева для плавного перехода */}
+      {hasUnread && (
         <div style={{
-          position: "absolute", inset: 0,
-          background: "linear-gradient(90deg, rgba(0,0,0,0.35) 0%, rgba(0,0,0,0.0) 60%)",
-          pointerEvents: "none",
-        }} />
-        {/* Время крупно поверх полоски */}
-        <span style={{
-          position: "relative", zIndex: 1,
-          fontSize: 14, fontWeight: 800,
-          color: "#fff",
-          fontFamily: "'JetBrains Mono', monospace",
-          textShadow: "0 1px 6px rgba(0,0,0,0.7)",
-          letterSpacing: "-0.5px",
+          width: 62,
+          flexShrink: 0,
+          background: stripGradient,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          position: "relative",
+          transition: "background 1.5s ease",
         }}>
-          {timeStr}
-        </span>
-      </div>
+          <div style={{
+            position: "absolute", inset: 0,
+            background: "linear-gradient(90deg, rgba(0,0,0,0.35) 0%, rgba(0,0,0,0.0) 60%)",
+            pointerEvents: "none",
+          }} />
+          <span style={{
+            position: "relative", zIndex: 1,
+            fontSize: 14, fontWeight: 800,
+            color: "#fff",
+            fontFamily: "'JetBrains Mono', monospace",
+            textShadow: "0 1px 6px rgba(0,0,0,0.7)",
+            letterSpacing: "-0.5px",
+          }}>
+            {timeStr}
+          </span>
+        </div>
+      )}
     </div>
   );
 };
 
 // ─── Фоновый таймер на всю высоту окна чата ───
-const ChatTimerBg = ({ lastMessageTime }) => {
+const ChatTimerBg = ({ lastMessageTime, unreadCount = 0 }) => {
+  if (unreadCount <= 0) return null;
+
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -398,7 +409,9 @@ const ChatTimerBg = ({ lastMessageTime }) => {
 };
 
 // Компактный таймер-бейдж для хедера чата
-const TimerBadge = ({ lastMessageTime }) => {
+const TimerBadge = ({ lastMessageTime, unreadCount = 0 }) => {
+  if (unreadCount <= 0) return null;
+
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -442,12 +455,15 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [marketplaces, setMarketplaces] = useState([]);
   const [chats, setChats] = useState([]);
   const [chatsLoading, setChatsLoading] = useState(true);
+  const [questions, setQuestions] = useState([]);
+  const [questionsLoading, setQuestionsLoading] = useState(true);
   const [tasks, setTasks] = useState([]);
   const [tasksLoading, setTasksLoading] = useState(true);
   const [activeView, setActiveView] = useState("chats");
   const [selectedMarketplace, setSelectedMarketplace] = useState(null);
   const [selectedCabinet, setSelectedCabinet] = useState(null);
   const [selectedChat, setSelectedChat] = useState(null);
+  const [selectedQuestion, setSelectedQuestion] = useState(null);
   const [messageInput, setMessageInput] = useState("");
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showChatTaskModal, setShowChatTaskModal] = useState(false);
@@ -457,7 +473,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [newTask, setNewTask] = useState({ title: "", date: "", time: "10:00", priority: "medium" });
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showAnalytics, setShowAnalytics] = useState(false);
-  const [selectedStatus, setSelectedStatus] = useState("OPEN");
+  const [selectedStatus, setSelectedStatus] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [realAnalytics, setRealAnalytics] = useState(null);
   const [dashboard, setDashboard] = useState(null);
@@ -479,6 +495,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [notifications, setNotifications] = useState([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifLoading, setNotifLoading] = useState(false);
+  const [manualSyncRunning, setManualSyncRunning] = useState(false);
   // ─── Поиск ───
   const [chatSearch, setChatSearch] = useState("");
   // ─── Настройки ───
@@ -549,7 +566,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           status: c.status,
           messages: [],
         }));
-        setChats(mapped);
+        setChats((prev) => mapped.map((chat) => {
+          const existing = prev.find((item) => item.id === chat.id);
+          return existing ? { ...chat, messages: existing.messages || [] } : chat;
+        }));
       }
     } catch (e) {
       console.error("Ошибка загрузки чатов:", e);
@@ -558,11 +578,46 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     }
   }, [apiUrl, selectedMarketplace, selectedCabinet, selectedStatus]);
 
+  const loadQuestions = useCallback(async () => {
+    if (!apiUrl) { setQuestionsLoading(false); return; }
+    try {
+      const params = new URLSearchParams();
+      if (selectedCabinet) params.set("cabinetId", selectedCabinet);
+      else if (selectedMarketplace) params.set("marketplaceId", selectedMarketplace);
+      params.set("limit", "100");
+      if (selectedStatus) params.set("status", selectedStatus);
+      const res = await fetch(`${apiUrl}/questions?${params}`, { headers: getHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const mapped = (data.data || []).map((c) => ({
+          id: c.id,
+          cabinetId: c.cabinetId,
+          marketplaceId: c.cabinet?.marketplace?.slug || c.cabinet?.marketplaceId || "wb",
+          customerName: c.customerName,
+          lastMessage: c.lastMessageText || "",
+          lastMessageTime: c.lastMessageAt ? new Date(c.lastMessageAt) : new Date(c.createdAt),
+          unread: c.unreadCount || 0,
+          responseTimeSec: c.elapsedSeconds || 0,
+          status: c.status,
+          messages: [],
+        }));
+        setQuestions((prev) => mapped.map((question) => {
+          const existing = prev.find((item) => item.id === question.id);
+          return existing ? { ...question, messages: existing.messages || [] } : question;
+        }));
+      }
+    } catch (e) {
+      console.error("Ошибка загрузки вопросов:", e);
+    } finally {
+      setQuestionsLoading(false);
+    }
+  }, [apiUrl, selectedMarketplace, selectedCabinet, selectedStatus]);
+
   // ─── Загрузка сообщений конкретного чата ───
-  const loadChatMessages = useCallback(async (chatId) => {
+  const loadConversationMessages = useCallback(async (chatId, kind = "chats") => {
     if (!apiUrl) return;
     try {
-      const res = await fetch(`${apiUrl}/chats/${chatId}`, { headers: getHeaders() });
+      const res = await fetch(`${apiUrl}/${kind}/${chatId}`, { headers: getHeaders() });
       if (res.ok) {
         const data = await res.json();
         const msgs = (data.data?.messages || []).map((m) => ({
@@ -571,7 +626,8 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           text: m.text,
           time: new Date(m.createdAt),
         }));
-        setChats((prev) => prev.map((c) => c.id === chatId ? { ...c, messages: msgs } : c));
+        const setter = kind === "questions" ? setQuestions : setChats;
+        setter((prev) => prev.map((c) => c.id === chatId ? { ...c, messages: msgs } : c));
       }
     } catch (e) {
       console.error("Ошибка загрузки сообщений:", e);
@@ -699,6 +755,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     loadChats();
   }, [loadChats]);
 
+  useEffect(() => {
+    loadQuestions();
+  }, [loadQuestions]);
+
   // ─── WebSocket: подключение и реал-тайм события ───
   useEffect(() => {
     if (!apiUrl) return;
@@ -755,13 +815,15 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
 
     // Периодическое обновление списка чатов (каждые 30 сек)
     const pollInterval = setInterval(() => loadChats(), 30000);
+    const pollQuestionsInterval = setInterval(() => loadQuestions(), 30000);
 
     return () => {
       getWsService().off("new_message", onNewMessage);
       getWsService().off("chat_updated", onChatUpdated);
       clearInterval(pollInterval);
+      clearInterval(pollQuestionsInterval);
     };
-  }, [apiUrl, soundEnabled, loadChats]);
+  }, [apiUrl, soundEnabled, loadChats, loadQuestions]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -782,27 +844,46 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     return result.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
   }, [chats, selectedMarketplace, selectedCabinet, selectedStatus, chatSearch]);
 
+  const filteredQuestions = useMemo(() => {
+    let result = questions;
+    if (selectedCabinet) result = result.filter((c) => c.cabinetId === selectedCabinet);
+    else if (selectedMarketplace) result = result.filter((c) => c.marketplaceId === selectedMarketplace);
+    if (selectedStatus) result = result.filter((c) => c.status === selectedStatus);
+    if (chatSearch.trim()) {
+      const q = chatSearch.toLowerCase();
+      result = result.filter((c) =>
+        c.customerName?.toLowerCase().includes(q) ||
+        c.lastMessage?.toLowerCase().includes(q)
+      );
+    }
+    return result.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
+  }, [questions, selectedMarketplace, selectedCabinet, selectedStatus, chatSearch]);
+
   const sendMessage = async () => {
-    if (!messageInput.trim() || !selectedChat) return;
+    const isQuestionsView = activeView === "questions";
+    const selectedConversation = isQuestionsView ? selectedQuestion : selectedChat;
+    if (!messageInput.trim() || !selectedConversation) return;
     const text = messageInput;
     setMessageInput("");
+    const basePath = isQuestionsView ? "questions" : "chats";
+    const setter = isQuestionsView ? setQuestions : setChats;
     // Оптимистичное обновление UI
     const tempMsg = { id: `temp-${Date.now()}`, from: "manager", text, time: new Date() };
-    setChats((prev) => prev.map((c) =>
-      c.id === selectedChat.id
+    setter((prev) => prev.map((c) =>
+      c.id === selectedConversation.id
         ? { ...c, messages: [...(c.messages || []), tempMsg], lastMessage: text, lastMessageTime: new Date(), unread: 0 }
         : c
     ));
     // Отправляем на сервер
     if (apiUrl) {
       try {
-        await fetch(`${apiUrl}/chats/${selectedChat.id}/messages`, {
+        await fetch(`${apiUrl}/${basePath}/${selectedConversation.id}/messages`, {
           method: "POST",
           headers: getHeaders(),
           body: JSON.stringify({ text }),
         });
         // Пометить прочитанным
-        await fetch(`${apiUrl}/chats/${selectedChat.id}/read`, { method: "PATCH", headers: getHeaders() });
+        await fetch(`${apiUrl}/${basePath}/${selectedConversation.id}/read`, { method: "PATCH", headers: getHeaders() });
       } catch (e) {
         console.error("Ошибка отправки сообщения:", e);
       }
@@ -865,7 +946,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
 
   // Создание задачи прямо из чата (привязка к чату)
   const addChatTask = async () => {
-    if (!chatTask.title || !chatTask.date || !currentChat) return;
+    if (!chatTask.title || !chatTask.date || !currentConversation) return;
     if (!apiUrl) return;
     try {
       const res = await fetch(`${apiUrl}/tasks`, {
@@ -873,7 +954,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         headers: getHeaders(),
         body: JSON.stringify({
           title: chatTask.title,
-          description: `Чат: ${currentChat.customerName} (${getCabinet(currentChat.cabinetId)?.name || currentChat.cabinetId || ""})`,
+          description: `${isQuestionsView ? "Вопрос" : "Чат"}: ${currentConversation.customerName} (${getCabinet(currentConversation.cabinetId)?.name || currentConversation.cabinetId || ""})`,
           dueDate: `${chatTask.date}T${chatTask.time}:00`,
           priority: chatTask.priority.toUpperCase(),
         }),
@@ -909,7 +990,30 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     () => chats.find((c) => c.id === selectedChat?.id),
     [chats, selectedChat]
   );
-
+  const currentQuestion = useMemo(
+    () => questions.find((c) => c.id === selectedQuestion?.id),
+    [questions, selectedQuestion]
+  );
+  const isQuestionsView = activeView === "questions";
+  const currentConversation = isQuestionsView ? currentQuestion : currentChat;
+  const visibleMessages = useMemo(() => {
+    if (!currentConversation) return [];
+    if (currentConversation.messages?.length) return currentConversation.messages;
+    if (currentConversation.lastMessage) {
+      return [{
+        id: `preview-${currentConversation.id}`,
+        from: "customer",
+        text: currentConversation.lastMessage,
+        time: currentConversation.lastMessageTime || new Date(),
+        isPreview: true,
+      }];
+    }
+    return [];
+  }, [currentConversation]);
+  const visibleConversations = isQuestionsView ? filteredQuestions : filteredChats;
+  const conversationsLoading = isQuestionsView ? questionsLoading : chatsLoading;
+  const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
+  const totalQuestionsUnread = questions.reduce((s, c) => s + (c.unread || 0), 0);
   const getMarketplace = (id) => marketplaces.find((m) => m.id === id);
   const getCabinet = (id) => {
     for (const mp of marketplaces) {
@@ -968,8 +1072,6 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     const s = sec % 60;
     return `${m}м ${s}с`;
   };
-
-  const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
 
   // ─── Styles ───
   const S = {
@@ -2076,6 +2178,14 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
             {totalUnread > 0 && <span style={{ ...S.badge(), marginLeft: "auto" }}>{totalUnread}</span>}
           </button>
           <button
+            style={S.navBtn(activeView === "questions")}
+            onClick={() => setActiveView("questions")}
+          >
+            {Icons.question()}
+            <span>Вопросы</span>
+            {totalQuestionsUnread > 0 && <span style={{ ...S.badge("#f59e0b"), marginLeft: "auto" }}>{totalQuestionsUnread}</span>}
+          </button>
+          <button
             style={S.navBtn(activeView === "calendar")}
             onClick={() => setActiveView("calendar")}
           >
@@ -2272,40 +2382,49 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       )}
 
       {/* Main Content */}
-      {activeView === "chats" && (
+      {(activeView === "chats" || activeView === "questions") && (
         <>
           {/* Chat List */}
           <div style={S.chatList}>
             <div style={{ ...S.chatListHeader, flexDirection: "column", gap: 10, padding: "14px 16px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
                 <div>
-                <div style={{ fontSize: 15, fontWeight: 700 }}>Сообщения</div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>{isQuestionsView ? "Вопросы" : "Сообщения"}</div>
                 {dashboard && (
                   <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>
-                    {dashboard.unreadMessages > 0 && <span style={{ color: "#ef4444", fontWeight: 600 }}>{dashboard.unreadMessages} непрочитанных · </span>}
-                    всего {dashboard.totalChats}
+                    {!isQuestionsView && dashboard.unreadMessages > 0 && <span style={{ color: "#ef4444", fontWeight: 600 }}>{dashboard.unreadMessages} непрочитанных · </span>}
+                    всего {visibleConversations.length}
                   </div>
                 )}
               </div>
                 <button
                   onClick={async () => {
-                    if (!apiUrl) return;
+                    if (!apiUrl || manualSyncRunning) return;
                     try {
+                      setManualSyncRunning(true);
                       await fetch(`${apiUrl}/sync/manual`, { method: "POST", headers: getHeaders() });
-                      setTimeout(() => loadChats(), 3000);
-                    } catch (e) {}
+                      setTimeout(() => {
+                        loadChats();
+                        loadQuestions();
+                        setManualSyncRunning(false);
+                      }, 3000);
+                    } catch (e) {
+                      setManualSyncRunning(false);
+                    }
                   }}
                   style={{
                     background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.15)",
-                    borderRadius: 6, padding: "4px 10px", color: "#22c55e", cursor: "pointer",
+                    borderRadius: 6, padding: "4px 10px", color: "#22c55e", cursor: manualSyncRunning ? "default" : "pointer",
                     fontSize: 11, fontFamily: "inherit", marginRight: 4,
+                    opacity: manualSyncRunning ? 0.6 : 1,
                   }}
                   title="Синхронизировать с маркетплейсами"
+                  disabled={manualSyncRunning}
                 >
-                  ↻ Синхронизировать
+                  {manualSyncRunning ? "↻ Синхронизация..." : "↻ Синхронизировать"}
                 </button>
                 <button
-                  onClick={() => loadChats()}
+                  onClick={() => isQuestionsView ? loadQuestions() : loadChats()}
                   style={{
                     background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)",
                     borderRadius: 6, padding: "4px 8px", color: "#64748b", cursor: "pointer",
@@ -2313,7 +2432,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   }}
                   title="Обновить"
                 >
-                  ↻ {filteredChats.length}
+                  ↻ {visibleConversations.length}
                 </button>
               </div>
               {/* Фильтр статусов */}
@@ -2360,17 +2479,17 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
               </div>
             </div>
             <div style={{ flex: 1, overflow: "auto" }}>
-              {(chatsLoading || marketplaces.length === 0) ? (
+              {(conversationsLoading || marketplaces.length === 0) ? (
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, color: "#475569", fontSize: 13 }}>
-                  Загрузка чатов...
+                  {isQuestionsView ? "Загрузка вопросов..." : "Загрузка чатов..."}
                 </div>
-              ) : filteredChats.length === 0 ? (
+              ) : visibleConversations.length === 0 ? (
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, color: "#475569", fontSize: 13, flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 32, opacity: 0.3 }}>💬</div>
-                  <div>Нет чатов</div>
+                  <div style={{ fontSize: 32, opacity: 0.3 }}>{isQuestionsView ? "❓" : "💬"}</div>
+                  <div>{isQuestionsView ? "Нет вопросов" : "Нет чатов"}</div>
                 </div>
               ) : null}
-              {!chatsLoading && marketplaces.length > 0 && filteredChats.map((chat) => {
+              {!conversationsLoading && marketplaces.length > 0 && visibleConversations.map((chat) => {
                 const mp = getMarketplace(chat.marketplaceId);
                 if (!mp) return null; // маркетплейс ещё не загружен
                 return (
@@ -2378,19 +2497,24 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     key={chat.id}
                     chat={chat}
                     mp={mp}
-                    active={selectedChat?.id === chat.id}
+                    active={(isQuestionsView ? selectedQuestion?.id : selectedChat?.id) === chat.id}
                     onClick={() => {
-                      setSelectedChat(chat);
-                      setChats((prev) => prev.map((c) => (c.id === chat.id ? { ...c, unread: 0 } : c)));
+                      if (isQuestionsView) {
+                        setSelectedQuestion(chat);
+                        setQuestions((prev) => prev.map((c) => (c.id === chat.id ? { ...c, unread: 0 } : c)));
+                      } else {
+                        setSelectedChat(chat);
+                        setChats((prev) => prev.map((c) => (c.id === chat.id ? { ...c, unread: 0 } : c)));
+                      }
                       // Загружаем сообщения если ещё не загружены
                       if (!chat.messages || chat.messages.length === 0) {
-                        loadChatMessages(chat.id);
+                        loadConversationMessages(chat.id, isQuestionsView ? "questions" : "chats");
                       }
                       // WS: подписка на чат
-                      getWsService().joinChat(chat.id);
+                      if (!isQuestionsView) getWsService().joinChat(chat.id);
                       // Помечаем прочитанным через API
                       if (apiUrl) {
-                        fetch(`${apiUrl}/chats/${chat.id}/read`, { method: "PATCH", headers: getHeaders() }).catch(() => {});
+                        fetch(`${apiUrl}/${isQuestionsView ? "questions" : "chats"}/${chat.id}/read`, { method: "PATCH", headers: getHeaders() }).catch(() => {});
                       }
                     }}
                     getCabinet={getCabinet}
@@ -2403,7 +2527,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
 
           {/* Chat Area */}
           <div style={S.chatArea}>
-            {currentChat ? (
+            {currentConversation ? (
               <>
                 <div
                   style={{
@@ -2418,33 +2542,35 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   <div
                     style={{
                       width: 38, height: 38, borderRadius: 10,
-                      background: `linear-gradient(135deg, ${getMarketplace(currentChat.marketplaceId)?.color}30, ${getMarketplace(currentChat.marketplaceId)?.color}10)`,
+                      background: `linear-gradient(135deg, ${getMarketplace(currentConversation.marketplaceId)?.color}30, ${getMarketplace(currentConversation.marketplaceId)?.color}10)`,
                       display: "flex", alignItems: "center", justifyContent: "center",
-                      color: getMarketplace(currentChat.marketplaceId)?.color,
+                      color: getMarketplace(currentConversation.marketplaceId)?.color,
                       fontSize: 15, fontWeight: 700,
                     }}
                   >
-                    {currentChat.customerName[0]}
+                    {currentConversation.customerName[0]}
                   </div>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 600 }}>{currentChat.customerName}</div>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>{currentConversation.customerName}</div>
                     <div style={{ fontSize: 11, color: "#64748b" }}>
-                      {getCabinet(currentChat.cabinetId)?.name} ·{" "}
-                      {getMarketplace(currentChat.marketplaceId)?.name}
+                      {getCabinet(currentConversation.cabinetId)?.name} ·{" "}
+                      {getMarketplace(currentConversation.marketplaceId)?.name}
                     </div>
                   </div>
                   <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
                     {/* Статус чата */}
                     <select
-                      value={currentChat.status || "OPEN"}
+                      value={currentConversation.status || "OPEN"}
                       onChange={async (e) => {
                         const newStatus = e.target.value;
+                        const basePath = isQuestionsView ? "questions" : "chats";
                         if (apiUrl) {
-                          await fetch(`${apiUrl}/chats/${currentChat.id}/status`, {
+                          await fetch(`${apiUrl}/${basePath}/${currentConversation.id}/status`, {
                             method: "PATCH", headers: getHeaders(),
                             body: JSON.stringify({ status: newStatus }),
                           }).catch(() => {});
-                          setChats((prev) => prev.map((c) => c.id === currentChat.id ? { ...c, status: newStatus } : c));
+                          const setter = isQuestionsView ? setQuestions : setChats;
+                          setter((prev) => prev.map((c) => c.id === currentConversation.id ? { ...c, status: newStatus } : c));
                         }
                       }}
                       style={{
@@ -2461,7 +2587,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     {/* Кнопка задачи из чата */}
                     <button
                       onClick={() => {
-                        setChatTask({ ...chatTask, title: `Ответить: ${currentChat.customerName}` });
+                        setChatTask({ ...chatTask, title: `Ответить: ${currentConversation.customerName}` });
                         setShowChatTaskModal(true);
                       }}
                       style={{
@@ -2488,31 +2614,34 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     >
                       {Icons.user()} Заказ
                     </button>
-                    <TimerBadge lastMessageTime={currentChat.lastMessageTime} />
+                    <TimerBadge
+                      lastMessageTime={currentConversation.lastMessageTime}
+                      unreadCount={currentConversation.unread || 0}
+                    />
                   </div>
                 </div>
 
                 {/* Панель информации о заказе */}
-                {showOrderInfo && (
+                {showOrderInfo && !isQuestionsView && (
                   <div style={{
                     padding: "12px 24px", borderBottom: "1px solid rgba(255,255,255,0.06)",
                     background: "rgba(59,130,246,0.04)", display: "flex", gap: 24, flexWrap: "wrap",
                   }}>
                     <div>
                       <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Схема</div>
-                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentChat.orderScheme || "FBO"}</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentConversation.orderScheme || "FBO"}</div>
                     </div>
                     <div>
                       <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Номер заказа</div>
-                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500, fontFamily: "'JetBrains Mono', monospace" }}>{currentChat.orderId || "—"}</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500, fontFamily: "'JetBrains Mono', monospace" }}>{currentConversation.orderId || "—"}</div>
                     </div>
                     <div>
                       <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Дата заказа</div>
-                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentChat.orderDate || "—"}</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentConversation.orderDate || "—"}</div>
                     </div>
                     <div>
                       <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Город</div>
-                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentChat.orderCity || "—"}</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentConversation.orderCity || "—"}</div>
                     </div>
                     <div style={{ fontSize: 10, color: "#475569", alignSelf: "center", fontStyle: "italic" }}>
                       Данные заполняются при DBS/rFBS схемах из API маркетплейса
@@ -2522,8 +2651,11 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
 
                 <div style={{ flex: 1, overflow: "auto", padding: "20px 24px", position: "relative" }}>
                   {/* Фоновая полоска таймера на всю высоту чата */}
-                  <ChatTimerBg lastMessageTime={currentChat.lastMessageTime} />
-                  {currentChat.messages.map((msg, i) => (
+                  <ChatTimerBg
+                    lastMessageTime={currentConversation.lastMessageTime}
+                    unreadCount={currentConversation.unread || 0}
+                  />
+                  {visibleMessages.map((msg, i) => (
                     <div
                       key={msg.id}
                       style={{
@@ -2560,11 +2692,16 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                           {new Date(msg.time).toLocaleTimeString("ru-RU", {
                             hour: "2-digit",
                             minute: "2-digit",
-                          })}
+                          })}{msg.isPreview ? " · превью" : ""}
                         </div>
                       </div>
                     </div>
                   ))}
+                  {currentConversation.messages?.length === 0 && currentConversation.lastMessage && (
+                    <div style={{ position: "relative", zIndex: 1, marginTop: 8, fontSize: 11, color: "#64748b" }}>
+                      Полная история пока не загрузилась, поэтому показываем последнее сообщение из списка чатов.
+                    </div>
+                  )}
                   <div ref={chatEndRef} />
                 </div>
 
@@ -2620,16 +2757,16 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     {/* Экспорт чата */}
                     <button
                       onClick={() => {
-                        if (!currentChat?.messages?.length) return;
-                        const lines = currentChat.messages.map(m =>
-                          `[${new Date(m.time).toLocaleString("ru-RU")}] ${m.from === "manager" ? "Менеджер" : currentChat.customerName}: ${m.text}`
+                        if (!currentConversation?.messages?.length) return;
+                        const lines = currentConversation.messages.map(m =>
+                          `[${new Date(m.time).toLocaleString("ru-RU")}] ${m.from === "manager" ? "Менеджер" : currentConversation.customerName}: ${m.text}`
                         );
                         const nl = "\n";
-                        const text = `Чат с ${currentChat.customerName}${nl}${getCabinet(currentChat.cabinetId)?.name || ""}${nl}${"─".repeat(40)}${nl}${lines.join(nl)}`;
+                        const text = `${isQuestionsView ? "Вопрос" : "Чат"} с ${currentConversation.customerName}${nl}${getCabinet(currentConversation.cabinetId)?.name || ""}${nl}${"─".repeat(40)}${nl}${lines.join(nl)}`;
                         const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement("a");
-                        a.href = url; a.download = `chat_${currentChat.customerName}_${Date.now()}.txt`; a.click();
+                        a.href = url; a.download = `${isQuestionsView ? "question" : "chat"}_${currentConversation.customerName}_${Date.now()}.txt`; a.click();
                       }}
                       title="Экспорт чата"
                       style={{
@@ -2646,7 +2783,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                 </div>
               </>
             ) : (
-              <div
+                <div
                 style={{
                   flex: 1,
                   display: "flex",
@@ -2657,8 +2794,8 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   color: "#334155",
                 }}
               >
-                <div style={{ fontSize: 48, opacity: 0.3 }}>{Icons.chat()}</div>
-                <div style={{ fontSize: 15, fontWeight: 500 }}>Выберите чат</div>
+                <div style={{ fontSize: 48, opacity: 0.3 }}>{isQuestionsView ? Icons.question() : Icons.chat()}</div>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>{isQuestionsView ? "Выберите вопрос" : "Выберите чат"}</div>
                 <div style={{ fontSize: 12 }}>Выберите диалог из списка слева</div>
               </div>
             )}
@@ -2772,7 +2909,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       )}
 
       {/* Chat Task Modal — задача из чата */}
-      {showChatTaskModal && currentChat && (
+      {showChatTaskModal && currentConversation && (
         <div style={S.modal} onClick={() => setShowChatTaskModal(false)}>
           <div style={S.modalContent} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
@@ -2790,7 +2927,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
             }}>
               <div style={{ fontSize: 11, color: "#a855f7", marginBottom: 2 }}>Привязан к чату:</div>
               <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>
-                {currentChat.customerName} · {getCabinet(currentChat.cabinetId)?.name || ""}
+                {currentConversation.customerName} · {getCabinet(currentConversation.cabinetId)?.name || ""}
               </div>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>

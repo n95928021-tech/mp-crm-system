@@ -27,7 +27,7 @@ module.exports = {
   // Marketplace APIs
   marketplaces: {
     wb: {
-      baseUrl: process.env.WB_API_BASE_URL || 'https://suppliers-api.wildberries.ru',
+      baseUrl: process.env.WB_API_BASE_URL || 'https://feedbacks-api.wildberries.ru',
       tokens: [
         process.env.WB_CABINET_1_TOKEN,
         process.env.WB_CABINET_2_TOKEN,
@@ -38,6 +38,8 @@ module.exports = {
     },
     ozon: {
       baseUrl: process.env.OZON_API_BASE_URL || 'https://api-seller.ozon.ru',
+      chatListPath: process.env.OZON_CHAT_LIST_PATH || '/v3/chat/list',
+      chatHistoryPath: process.env.OZON_CHAT_HISTORY_PATH || '/v3/chat/history',
       cabinets: [1, 2, 3, 4].map((i) => ({
         clientId: process.env[`OZON_CABINET_${i}_CLIENT_ID`],
         apiKey: process.env[`OZON_CABINET_${i}_API_KEY`],

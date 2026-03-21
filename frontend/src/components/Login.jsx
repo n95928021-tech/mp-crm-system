@@ -1,6 +1,5 @@
 import { useState } from 'react';
-
-const API = 'http://localhost:4000/api/v1';
+import { authAPI } from '../services/api.js';
 
 export default function Login({ onLogin }) {
   const [email, setEmail] = useState('');
@@ -14,14 +13,9 @@ export default function Login({ onLogin }) {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json();
+      const { data } = await authAPI.login(email, password);
 
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         setError(data.error || 'Ошибка входа');
         setLoading(false);
         return;

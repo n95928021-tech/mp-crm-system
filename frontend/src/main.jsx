@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import Login from './components/Login.jsx';
 import App from './components/App.jsx';
+import { authAPI } from './services/api.js';
 
 function Root() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -10,19 +11,16 @@ function Root() {
   useEffect(() => {
     const token = localStorage.getItem('accessToken');
     if (token) {
-      fetch('http://localhost:4000/api/v1/auth/me', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((res) => {
-          if (res.ok) {
-            setIsAuthenticated(true);
-          } else {
-            localStorage.removeItem('accessToken');
-            localStorage.removeItem('refreshToken');
-          }
+      authAPI.getMe()
+        .then(() => {
+          setIsAuthenticated(true);
           setLoading(false);
         })
-        .catch(() => setLoading(false));
+        .catch(() => {
+          localStorage.removeItem('accessToken');
+          localStorage.removeItem('refreshToken');
+          setLoading(false);
+        });
     } else {
       setLoading(false);
     }

@@ -108,6 +108,7 @@ const setupCronJobs = (io) => {
         const chats = await prisma.chat.findMany({
           where: {
             cabinetId: cabinet.id,
+            conversationType: 'CHAT',
             createdAt: { gte: today },
           },
           include: {

@@ -189,6 +189,9 @@ exports.toggleTask = async (req, res, next) => {
     if (!task) {
       return res.status(404).json({ success: false, error: 'Задача не найдена' });
     }
+    if (task.userId !== req.user.id && req.user.role !== 'ADMIN') {
+      return res.status(403).json({ success: false, error: 'Нет доступа' });
+    }
 
     const newStatus = task.status === 'DONE' ? 'TODO' : 'DONE';
     const updated = await prisma.task.update({

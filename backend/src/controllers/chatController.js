@@ -1,13 +1,81 @@
 const prisma = require('../config/database');
 const logger = require('../utils/logger');
 
+const getConversationTypeFromRequest = (req) => {
+  return req.conversationType || req.query.conversationType || 'CHAT';
+};
+
+const compareChatsForList = (a, b) => {
+  const aIsOzon = a.cabinet?.marketplace?.slug === 'ozon';
+  const bIsOzon = b.cabinet?.marketplace?.slug === 'ozon';
+
+  if (aIsOzon && bIsOzon) {
+    const aKey = a.customerExternalId || '';
+    const bKey = b.customerExternalId || '';
+
+    if (/^\d+$/.test(aKey) && /^\d+$/.test(bKey)) {
+      const aSort = BigInt(aKey);
+      const bSort = BigInt(bKey);
+      if (aSort > bSort) return -1;
+      if (aSort < bSort) return 1;
+    }
+  }
+
+  const aTime = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+  const bTime = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+  return bTime - aTime;
+};
+
+const ensureChatAccess = async (chatId, user, conversationType = 'CHAT') => {
+  const chat = await prisma.chat.findUnique({
+    where: { id: chatId },
+    include: {
+      cabinet: { include: { marketplace: true } },
+      assignedManager: {
+        select: { id: true, firstName: true, lastName: true },
+      },
+    },
+  });
+
+  if (!chat) {
+    return { error: { status: 404, body: { success: false, error: 'Чат не найден' } } };
+  }
+
+  if (chat.conversationType !== conversationType) {
+    return { error: { status: 404, body: { success: false, error: 'Диалог не найден' } } };
+  }
+
+  if (user.role === 'ADMIN') {
+    return { chat };
+  }
+
+  const access = await prisma.userCabinet.findUnique({
+    where: {
+      userId_cabinetId: {
+        userId: user.id,
+        cabinetId: chat.cabinetId,
+      },
+    },
+  });
+
+  if (!access) {
+    return { error: { status: 403, body: { success: false, error: 'Нет доступа к данному чату' } } };
+  }
+
+  return { chat };
+};
+
 // GET /chats — список чатов с фильтрацией
 exports.getChats = async (req, res, next) => {
   try {
+    const conversationType = getConversationTypeFromRequest(req);
     const { marketplaceId, cabinetId, status, page = 1, limit = 50 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const where = {};
+    const where = { conversationType };
+    if (conversationType === 'CHAT') {
+      where.externalChatId = { not: null };
+    }
 
     // Фильтр по кабинету
     if (cabinetId) {
@@ -31,7 +99,7 @@ exports.getChats = async (req, res, next) => {
         : { in: cabinetIds };
     }
 
-    const [chats, total] = await Promise.all([
+    const [allChats, total] = await Promise.all([
       prisma.chat.findMany({
         where,
         include: {
@@ -43,15 +111,13 @@ exports.getChats = async (req, res, next) => {
           },
         },
         orderBy: { lastMessageAt: 'desc' },
-        skip,
-        take: parseInt(limit),
       }),
       prisma.chat.count({ where }),
     ]);
 
     // Добавляем timer color к каждому чату
     const now = Date.now();
-    const enrichedChats = chats.map((chat) => {
+    const enrichedChats = allChats.map((chat) => {
       const elapsed = chat.lastMessageAt
         ? (now - new Date(chat.lastMessageAt).getTime()) / 1000
         : 999;
@@ -60,7 +126,7 @@ exports.getChats = async (req, res, next) => {
       else if (elapsed < 300) timerColor = 'yellow';
 
       return { ...chat, timerColor, elapsedSeconds: Math.round(elapsed) };
-    });
+    }).sort(compareChatsForList).slice(skip, skip + parseInt(limit));
 
     res.json({
       success: true,
@@ -80,6 +146,12 @@ exports.getChats = async (req, res, next) => {
 // GET /chats/:chatId — один чат с сообщениями
 exports.getChatById = async (req, res, next) => {
   try {
+    const conversationType = getConversationTypeFromRequest(req);
+    const accessResult = await ensureChatAccess(req.params.chatId, req.user, conversationType);
+    if (accessResult.error) {
+      return res.status(accessResult.error.status).json(accessResult.error.body);
+    }
+
     const chat = await prisma.chat.findUnique({
       where: { id: req.params.chatId },
       include: {
@@ -98,8 +170,23 @@ exports.getChatById = async (req, res, next) => {
       },
     });
 
-    if (!chat) {
-      return res.status(404).json({ success: false, error: 'Чат не найден' });
+    if (
+      chat &&
+      chat.messages.length === 0 &&
+      chat.lastMessageText &&
+      chat.externalChatId?.startsWith('ozon-')
+    ) {
+      chat.messages = [{
+        id: `preview-${chat.id}`,
+        chatId: chat.id,
+        senderType: 'CUSTOMER',
+        senderId: null,
+        text: chat.lastMessageText,
+        externalMsgId: null,
+        isRead: true,
+        createdAt: chat.lastMessageAt || chat.updatedAt || chat.createdAt,
+        sender: null,
+      }];
     }
 
     res.json({ success: true, data: chat });
@@ -111,18 +198,15 @@ exports.getChatById = async (req, res, next) => {
 // POST /chats/:chatId/messages — отправить сообщение
 exports.sendMessage = async (req, res, next) => {
   try {
+    const conversationType = getConversationTypeFromRequest(req);
     const { chatId } = req.params;
     const { text } = req.body;
 
-    const chat = await prisma.chat.findUnique({
-      where: { id: chatId },
-      include: {
-        cabinet: { include: { marketplace: true } },
-      },
-    });
-    if (!chat) {
-      return res.status(404).json({ success: false, error: 'Чат не найден' });
+    const accessResult = await ensureChatAccess(chatId, req.user, conversationType);
+    if (accessResult.error) {
+      return res.status(accessResult.error.status).json(accessResult.error.body);
     }
+    const { chat } = accessResult;
 
     // ── Отправляем на маркетплейс (если есть externalChatId и ключи) ──
     let marketplaceSent = false;
@@ -178,7 +262,12 @@ exports.sendMessage = async (req, res, next) => {
 // PATCH /chats/:chatId/read — пометить как прочитанное
 exports.markAsRead = async (req, res, next) => {
   try {
+    const conversationType = getConversationTypeFromRequest(req);
     const { chatId } = req.params;
+    const accessResult = await ensureChatAccess(chatId, req.user, conversationType);
+    if (accessResult.error) {
+      return res.status(accessResult.error.status).json(accessResult.error.body);
+    }
 
     await prisma.chatMessage.updateMany({
       where: { chatId, isRead: false, senderType: 'CUSTOMER' },
@@ -199,8 +288,13 @@ exports.markAsRead = async (req, res, next) => {
 // PATCH /chats/:chatId/assign — назначить менеджера
 exports.assignManager = async (req, res, next) => {
   try {
+    const conversationType = getConversationTypeFromRequest(req);
     const { chatId } = req.params;
     const { managerId } = req.body;
+    const accessResult = await ensureChatAccess(chatId, req.user, conversationType);
+    if (accessResult.error) {
+      return res.status(accessResult.error.status).json(accessResult.error.body);
+    }
 
     const chat = await prisma.chat.update({
       where: { id: chatId },
@@ -221,8 +315,13 @@ exports.assignManager = async (req, res, next) => {
 // PATCH /chats/:chatId/status — изменить статус чата
 exports.updateStatus = async (req, res, next) => {
   try {
+    const conversationType = getConversationTypeFromRequest(req);
     const { chatId } = req.params;
     const { status } = req.body;
+    const accessResult = await ensureChatAccess(chatId, req.user, conversationType);
+    if (accessResult.error) {
+      return res.status(accessResult.error.status).json(accessResult.error.body);
+    }
 
     const chat = await prisma.chat.update({
       where: { id: chatId },
@@ -233,4 +332,14 @@ exports.updateStatus = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+};
+
+exports.useQuestions = (req, res, next) => {
+  req.conversationType = 'QUESTION';
+  next();
+};
+
+exports.useChats = (req, res, next) => {
+  req.conversationType = 'CHAT';
+  next();
 };

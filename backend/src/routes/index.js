@@ -10,6 +10,7 @@ const marketplaceController = require('../controllers/marketplaceController');
 const notificationController = require('../controllers/notificationController');
 
 const router = express.Router();
+let manualSyncInProgress = false;
 
 // ─── Health Check ───
 router.get('/health', (req, res) => {
@@ -30,12 +31,20 @@ router.post('/cabinets', authenticate, authorize('ADMIN'), marketplaceController
 router.put('/cabinets/:cabinetId', authenticate, authorize('ADMIN'), marketplaceController.updateCabinet);
 
 // ─── Chats ───
-router.get('/chats', authenticate, chatController.getChats);
-router.get('/chats/:chatId', authenticate, chatController.getChatById);
-router.post('/chats/:chatId/messages', authenticate, chatController.sendMessage);
-router.patch('/chats/:chatId/read', authenticate, chatController.markAsRead);
-router.patch('/chats/:chatId/assign', authenticate, chatController.assignManager);
-router.patch('/chats/:chatId/status', authenticate, chatController.updateStatus);
+router.get('/chats', authenticate, chatController.useChats, chatController.getChats);
+router.get('/chats/:chatId', authenticate, chatController.useChats, chatController.getChatById);
+router.post('/chats/:chatId/messages', authenticate, chatController.useChats, chatController.sendMessage);
+router.patch('/chats/:chatId/read', authenticate, chatController.useChats, chatController.markAsRead);
+router.patch('/chats/:chatId/assign', authenticate, chatController.useChats, chatController.assignManager);
+router.patch('/chats/:chatId/status', authenticate, chatController.useChats, chatController.updateStatus);
+
+// ─── Questions ───
+router.get('/questions', authenticate, chatController.useQuestions, chatController.getChats);
+router.get('/questions/:chatId', authenticate, chatController.useQuestions, chatController.getChatById);
+router.post('/questions/:chatId/messages', authenticate, chatController.useQuestions, chatController.sendMessage);
+router.patch('/questions/:chatId/read', authenticate, chatController.useQuestions, chatController.markAsRead);
+router.patch('/questions/:chatId/assign', authenticate, chatController.useQuestions, chatController.assignManager);
+router.patch('/questions/:chatId/status', authenticate, chatController.useQuestions, chatController.updateStatus);
 
 // ─── Tasks ───
 router.get('/tasks', authenticate, taskController.getTasks);
@@ -53,11 +62,26 @@ router.patch('/notifications/:id/read', authenticate, notificationController.mar
 // ─── Sync (ручной запуск) ───
 router.post('/sync/manual', authenticate, authorize('ADMIN'), async (req, res) => {
   try {
+    if (manualSyncInProgress) {
+      return res.status(202).json({
+        success: true,
+        message: 'Синхронизация уже выполняется',
+        alreadyRunning: true,
+      });
+    }
+
     const { syncAllMarketplaces } = require('../services/marketplaceSync');
     const io = req.app.get('io');
-    syncAllMarketplaces(io).catch(e => console.error('sync error:', e));
-    res.json({ success: true, message: 'Синхронизация запущена' });
+    manualSyncInProgress = true;
+    syncAllMarketplaces(io)
+      .catch((e) => console.error('sync error:', e))
+      .finally(() => {
+        manualSyncInProgress = false;
+      });
+
+    res.json({ success: true, message: 'Синхронизация запущена', alreadyRunning: false });
   } catch (e) {
+    manualSyncInProgress = false;
     res.status(500).json({ success: false, error: e.message });
   }
 });

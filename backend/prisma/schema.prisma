@@ -110,6 +110,7 @@ model UserCabinet {
 model Chat {
   id                 String     @id @default(uuid())
   cabinetId          String     @map("cabinet_id")
+  conversationType   ConversationType @default(CHAT) @map("conversation_type")
   externalChatId     String?    @map("external_chat_id")  // ID чата на маркетплейсе
   customerName       String     @map("customer_name")
   customerExternalId String?    @map("customer_external_id")
@@ -129,7 +130,13 @@ model Chat {
   @@index([cabinetId, lastMessageAt])
   @@index([assignedManagerId])
   @@index([cabinetId, externalChatId])
+  @@index([conversationType, cabinetId, lastMessageAt])
   @@map("chats")
+}
+
+enum ConversationType {
+  CHAT
+  QUESTION
 }
 
 enum ChatStatus {

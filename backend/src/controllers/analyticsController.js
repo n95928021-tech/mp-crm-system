@@ -7,7 +7,7 @@ exports.getResponseTimeAnalytics = async (req, res, next) => {
     const { startDate, endDate, cabinetId, marketplaceId } = req.query;
 
     // Базовый фильтр
-    const chatWhere = {};
+    const chatWhere = { conversationType: 'CHAT' };
     if (cabinetId) chatWhere.cabinetId = cabinetId;
     if (marketplaceId) chatWhere.cabinet = { marketplaceId };
 
@@ -134,7 +134,7 @@ exports.exportResponseTimeCSV = async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
 
-    const chatWhere = {};
+    const chatWhere = { conversationType: 'CHAT' };
     if (startDate || endDate) {
       chatWhere.createdAt = {};
       if (startDate) chatWhere.createdAt.gte = new Date(startDate);
@@ -216,8 +216,8 @@ exports.getDashboard = async (req, res, next) => {
       totalMessages,
       unreadMessages,
     ] = await Promise.all([
-      prisma.chat.count(),
-      prisma.chat.count({ where: { status: 'OPEN' } }),
+      prisma.chat.count({ where: { conversationType: 'CHAT' } }),
+      prisma.chat.count({ where: { conversationType: 'CHAT', status: 'OPEN' } }),
       prisma.task.count({ where: { userId: req.user.id } }),
       prisma.task.count({
         where: {
@@ -227,7 +227,7 @@ exports.getDashboard = async (req, res, next) => {
         },
       }),
       prisma.chatMessage.count(),
-      prisma.chat.aggregate({ _sum: { unreadCount: true } }),
+      prisma.chat.aggregate({ where: { conversationType: 'CHAT' }, _sum: { unreadCount: true } }),
     ]);
 
     res.json({
