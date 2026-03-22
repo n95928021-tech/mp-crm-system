@@ -6,24 +6,21 @@ const getConversationTypeFromRequest = (req) => {
 };
 
 const compareChatsForList = (a, b) => {
-  const aIsOzon = a.cabinet?.marketplace?.slug === 'ozon';
-  const bIsOzon = b.cabinet?.marketplace?.slug === 'ozon';
-
-  if (aIsOzon && bIsOzon) {
-    const aKey = a.customerExternalId || '';
-    const bKey = b.customerExternalId || '';
-
-    if (/^\d+$/.test(aKey) && /^\d+$/.test(bKey)) {
-      const aSort = BigInt(aKey);
-      const bSort = BigInt(bKey);
-      if (aSort > bSort) return -1;
-      if (aSort < bSort) return 1;
-    }
-  }
-
   const aTime = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
   const bTime = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
-  return bTime - aTime;
+  if (bTime !== aTime) return bTime - aTime;
+
+  const aKey = a.customerExternalId || '';
+  const bKey = b.customerExternalId || '';
+
+  if (/^\d+$/.test(aKey) && /^\d+$/.test(bKey)) {
+    const aSort = BigInt(aKey);
+    const bSort = BigInt(bKey);
+    if (aSort > bSort) return -1;
+    if (aSort < bSort) return 1;
+  }
+
+  return 0;
 };
 
 const ensureChatAccess = async (chatId, user, conversationType = 'CHAT') => {
@@ -182,6 +179,10 @@ exports.getChatById = async (req, res, next) => {
         senderType: 'CUSTOMER',
         senderId: null,
         text: chat.lastMessageText,
+        messageType: 'TEXT',
+        mediaUrl: null,
+        thumbnailUrl: null,
+        mediaMimeType: null,
         externalMsgId: null,
         isRead: true,
         createdAt: chat.lastMessageAt || chat.updatedAt || chat.createdAt,
@@ -232,6 +233,7 @@ exports.sendMessage = async (req, res, next) => {
         senderType: 'MANAGER',
         senderId: req.user.id,
         text,
+        messageType: 'TEXT',
       },
       include: {
         sender: { select: { id: true, firstName: true, lastName: true } },

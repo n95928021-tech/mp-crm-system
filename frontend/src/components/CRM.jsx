@@ -198,6 +198,87 @@ const MP_COLORS = { wb: "#a855f7", ozon: "#3b82f6", yandex: "#f59e0b" };
 
 // Все данные грузятся из API
 
+const normalizeCustomerName = (name, marketplaceId) => {
+  if (!name || !name.trim()) return "Покупатель";
+  if (marketplaceId === "ozon" && name.startsWith("Ozon чат")) return "Покупатель";
+  return name;
+};
+
+const formatOrderDate = (value) => {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+};
+
+const extractOrderInfoFromMessages = (messages = [], marketplaceId = "") => {
+  const texts = messages
+    .map((msg) => ({ text: msg?.text || "", time: msg?.time || null }))
+    .filter((entry) => entry.text);
+
+  const reversed = [...texts].reverse();
+  const orderPatterns = [
+    /отправление\s*№\s*([A-ZА-ЯЁOО]?\d{8,9}-\d{4}-\d)/i,
+    /заказ\s*№\s*([A-ZА-ЯЁOО]?\d{8,9}-\d{4}-\d)/i,
+    /\b([A-ZА-ЯЁOО]?\d{8,9}-\d{4}-\d)\b/i,
+  ];
+
+  let orderId = "";
+  let orderTime = null;
+
+  for (const entry of reversed) {
+    for (const pattern of orderPatterns) {
+      const match = entry.text.match(pattern);
+      if (match?.[1]) {
+        orderId = match[1];
+        orderTime = entry.time;
+        break;
+      }
+    }
+    if (orderId) break;
+  }
+
+  let orderScheme = "";
+  for (const entry of reversed) {
+    const schemeMatch = entry.text.match(/\b(realFBS|rFBS|FBS|FBO|DBS)\b/i);
+    if (schemeMatch?.[1]) {
+      orderScheme = schemeMatch[1].toUpperCase();
+      break;
+    }
+  }
+
+  let orderCity = "";
+  for (const entry of reversed) {
+    const cityMatch = entry.text.match(/(?:город|г\.)\s*([А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+)/i);
+    if (cityMatch?.[1]) {
+      orderCity = cityMatch[1];
+      break;
+    }
+  }
+
+  if (!orderScheme && marketplaceId === "ozon") {
+    orderScheme = "Ozon";
+  }
+
+  return {
+    orderId: orderId || "",
+    orderDate: orderTime ? formatOrderDate(orderTime) : "",
+    orderCity: orderCity || "",
+    orderScheme: orderScheme || "",
+  };
+};
+
+const getMessagePreview = (message) => {
+  if (!message) return "";
+  if (message.messageType === "IMAGE") return message.text || "📷 Фотография";
+  if (message.messageType === "FILE") return message.text || "📎 Файл";
+  return message.text || "";
+};
+
 // ─── Timer Progress Bar Component ───
 const TimerBar = ({ lastMessageTime }) => {
   const [elapsed, setElapsed] = useState(0);
@@ -287,11 +368,12 @@ const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badg
     stripGradient = "linear-gradient(180deg, #b91c1c 0%, #ef4444 50%, #f87171 100%)";
   }
 
-  const m = Math.floor(elapsed / 60);
-  const s = elapsed % 60;
-  const timeStr = `${m}:${s.toString().padStart(2, "0")}`;
-  const displayName = chat.customerName || "Диалог";
+  const displayName = normalizeCustomerName(chat.customerName, chat.marketplaceId);
   const avatarLetter = displayName[0] || "D";
+  const timeLabel = new Date(chat.lastMessageTime).toLocaleTimeString("ru-RU", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
   return (
     <div
@@ -308,7 +390,15 @@ const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badg
       }}
     >
       {/* Левая часть — аватар + контент */}
-      <div style={{ display: "flex", gap: 12, padding: "12px 8px 12px 14px", flex: 1, minWidth: 0 }}>
+      <div style={{ display: "flex", gap: 10, padding: "12px 12px 12px 14px", flex: 1, minWidth: 0 }}>
+        <div style={{
+          width: 4,
+          borderRadius: 999,
+          alignSelf: "stretch",
+          background: hasUnread ? stripGradient : "transparent",
+          opacity: hasUnread ? 1 : 0,
+          flexShrink: 0,
+        }} />
         {/* Аватар */}
         <div style={{
           width: 40, height: 40, borderRadius: 10,
@@ -345,34 +435,53 @@ const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badg
         </div>
       </div>
 
-      {hasUnread && (
-        <div style={{
-          width: 62,
-          flexShrink: 0,
-          background: stripGradient,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          position: "relative",
-          transition: "background 1.5s ease",
+      <div style={{
+        width: 56,
+        flexShrink: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-end",
+        justifyContent: "center",
+        gap: 10,
+        padding: "12px 12px 12px 0",
+      }}>
+        <span style={{
+          fontSize: 11,
+          fontWeight: 500,
+          color: "#94a3b8",
+          fontVariantNumeric: "tabular-nums",
         }}>
-          <div style={{
-            position: "absolute", inset: 0,
-            background: "linear-gradient(90deg, rgba(0,0,0,0.35) 0%, rgba(0,0,0,0.0) 60%)",
-            pointerEvents: "none",
-          }} />
+          {timeLabel}
+        </span>
+        {hasUnread ? (
           <span style={{
-            position: "relative", zIndex: 1,
-            fontSize: 14, fontWeight: 800,
-            color: "#fff",
-            fontFamily: "'JetBrains Mono', monospace",
-            textShadow: "0 1px 6px rgba(0,0,0,0.7)",
-            letterSpacing: "-0.5px",
+            ...badge("#ec4899"),
+            minWidth: 22,
+            height: 22,
+            borderRadius: 999,
+            fontSize: 11,
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(236,72,153,0.14)",
+            color: "#ec4899",
           }}>
-            {timeStr}
+            {chat.unread}
           </span>
-        </div>
-      )}
+        ) : (
+          <span style={{
+            fontSize: 18,
+            lineHeight: 1,
+            color: "#3b82f6",
+            fontWeight: 700,
+            letterSpacing: "-2px",
+            transform: "translateX(1px)",
+          }}>
+            ✓✓
+          </span>
+        )}
+      </div>
     </div>
   );
 };
@@ -558,7 +667,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           id: c.id,
           cabinetId: c.cabinetId,
           marketplaceId: c.cabinet?.marketplace?.slug || c.cabinet?.marketplaceId || "wb",
-          customerName: c.customerName,
+          customerName: normalizeCustomerName(c.customerName, c.cabinet?.marketplace?.slug || c.cabinet?.marketplaceId || "wb"),
           lastMessage: c.lastMessageText || "",
           lastMessageTime: c.lastMessageAt ? new Date(c.lastMessageAt) : new Date(c.createdAt),
           unread: c.unreadCount || 0,
@@ -593,7 +702,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           id: c.id,
           cabinetId: c.cabinetId,
           marketplaceId: c.cabinet?.marketplace?.slug || c.cabinet?.marketplaceId || "wb",
-          customerName: c.customerName,
+          customerName: normalizeCustomerName(c.customerName, c.cabinet?.marketplace?.slug || c.cabinet?.marketplaceId || "wb"),
           lastMessage: c.lastMessageText || "",
           lastMessageTime: c.lastMessageAt ? new Date(c.lastMessageAt) : new Date(c.createdAt),
           unread: c.unreadCount || 0,
@@ -624,10 +733,23 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           id: m.id,
           from: m.senderType === "MANAGER" ? "manager" : "customer",
           text: m.text,
+          messageType: m.messageType || "TEXT",
+          mediaUrl: m.mediaUrl || null,
+          thumbnailUrl: m.thumbnailUrl || null,
+          mediaMimeType: m.mediaMimeType || null,
           time: new Date(m.createdAt),
         }));
         const setter = kind === "questions" ? setQuestions : setChats;
-        setter((prev) => prev.map((c) => c.id === chatId ? { ...c, messages: msgs } : c));
+        setter((prev) => prev.map((c) => {
+          if (c.id !== chatId) return c;
+          const lastMsg = msgs[msgs.length - 1];
+          return {
+            ...c,
+            messages: msgs,
+            lastMessage: lastMsg ? getMessagePreview(lastMsg) : c.lastMessage,
+            lastMessageTime: lastMsg ? lastMsg.time : c.lastMessageTime,
+          };
+        }));
       }
     } catch (e) {
       console.error("Ошибка загрузки сообщений:", e);
@@ -775,11 +897,15 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           id: message.id,
           from: message.senderType === "MANAGER" ? "manager" : "customer",
           text: message.text,
+          messageType: message.messageType || "TEXT",
+          mediaUrl: message.mediaUrl || null,
+          thumbnailUrl: message.thumbnailUrl || null,
+          mediaMimeType: message.mediaMimeType || null,
           time: new Date(message.createdAt),
         };
         return {
           ...c,
-          lastMessage: message.text,
+          lastMessage: getMessagePreview(newMsg),
           lastMessageTime: new Date(message.createdAt),
           unread: (c.unread || 0) + (message.senderType !== "MANAGER" ? 1 : 0),
           messages: [...(c.messages || []), newMsg],
@@ -1004,12 +1130,20 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         id: `preview-${currentConversation.id}`,
         from: "customer",
         text: currentConversation.lastMessage,
+        messageType: currentConversation.lastMessage?.includes("📷") ? "IMAGE" : currentConversation.lastMessage?.includes("📎") ? "FILE" : "TEXT",
+        mediaUrl: null,
+        thumbnailUrl: null,
+        mediaMimeType: null,
         time: currentConversation.lastMessageTime || new Date(),
         isPreview: true,
       }];
     }
     return [];
   }, [currentConversation]);
+  const derivedOrderInfo = useMemo(() => {
+    if (!currentConversation || isQuestionsView) return null;
+    return extractOrderInfoFromMessages(visibleMessages, currentConversation.marketplaceId);
+  }, [currentConversation, isQuestionsView, visibleMessages]);
   const visibleConversations = isQuestionsView ? filteredQuestions : filteredChats;
   const conversationsLoading = isQuestionsView ? questionsLoading : chatsLoading;
   const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
@@ -2629,19 +2763,27 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   }}>
                     <div>
                       <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Схема</div>
-                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentConversation.orderScheme || "FBO"}</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>
+                        {currentConversation.orderScheme || derivedOrderInfo?.orderScheme || "—"}
+                      </div>
                     </div>
                     <div>
                       <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Номер заказа</div>
-                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500, fontFamily: "'JetBrains Mono', monospace" }}>{currentConversation.orderId || "—"}</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {currentConversation.orderId || derivedOrderInfo?.orderId || "—"}
+                      </div>
                     </div>
                     <div>
                       <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Дата заказа</div>
-                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentConversation.orderDate || "—"}</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>
+                        {currentConversation.orderDate || derivedOrderInfo?.orderDate || "—"}
+                      </div>
                     </div>
                     <div>
                       <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>Город</div>
-                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>{currentConversation.orderCity || "—"}</div>
+                      <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 500 }}>
+                        {currentConversation.orderCity || derivedOrderInfo?.orderCity || "—"}
+                      </div>
                     </div>
                     <div style={{ fontSize: 10, color: "#475569", alignSelf: "center", fontStyle: "italic" }}>
                       Данные заполняются при DBS/rFBS схемах из API маркетплейса
@@ -2680,6 +2822,41 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                           lineHeight: 1.5,
                         }}
                       >
+                        {msg.mediaUrl && msg.messageType === "IMAGE" && (
+                          <div style={{ marginBottom: msg.text ? 10 : 0 }}>
+                            <img
+                              src={msg.thumbnailUrl || msg.mediaUrl}
+                              alt="Вложение"
+                              style={{
+                                display: "block",
+                                maxWidth: "100%",
+                                maxHeight: 280,
+                                borderRadius: 12,
+                                objectFit: "cover",
+                                cursor: "pointer",
+                              }}
+                              onClick={() => window.open(msg.mediaUrl, "_blank", "noopener,noreferrer")}
+                            />
+                          </div>
+                        )}
+                        {msg.mediaUrl && msg.messageType === "FILE" && (
+                          <a
+                            href={msg.mediaUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 6,
+                              color: msg.from === "manager" ? "#fff" : "#93c5fd",
+                              textDecoration: "none",
+                              marginBottom: msg.text ? 8 : 0,
+                            }}
+                          >
+                            <span>📎</span>
+                            <span>Открыть файл</span>
+                          </a>
+                        )}
                         {msg.text}
                         <div
                           style={{

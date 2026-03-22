@@ -38,6 +38,10 @@ class MarketplaceSyncService {
       externalChatId,
       customerName,
       text,
+      messageType = 'TEXT',
+      mediaUrl,
+      thumbnailUrl,
+      mediaMimeType,
       externalMsgId,
       conversationType = 'CHAT',
       senderType = 'CUSTOMER',
@@ -81,6 +85,10 @@ class MarketplaceSyncService {
         chatId: chat.id,
         senderType,
         text,
+        messageType,
+        mediaUrl,
+        thumbnailUrl,
+        mediaMimeType,
         externalMsgId,
         createdAt: messageCreatedAt,
       },
@@ -276,7 +284,7 @@ class OzonSyncService extends MarketplaceSyncService {
       return explicitName;
     }
 
-    return `Ozon чат ${String(chatId).slice(-8)}`;
+    return 'Покупатель';
   }
 
   isOzonBuyerSellerChat(chatData, chatMeta) {
@@ -316,8 +324,10 @@ class OzonSyncService extends MarketplaceSyncService {
 
     if (explicitName) return explicitName;
 
-    if ((msg.user?.type || '').toString().toLowerCase() === 'customer' && msg.user?.id) {
-      return `Покупатель ${msg.user.id}`;
+    if ((msg.user?.type || '').toString().toLowerCase() === 'customer') {
+      return fallbackName && !fallbackName.startsWith('Ozon чат')
+        ? fallbackName
+        : 'Покупатель';
     }
 
     return fallbackName;
@@ -341,6 +351,27 @@ class OzonSyncService extends MarketplaceSyncService {
       chatMeta.updated_at ||
       chatMeta.created_at
     );
+  }
+
+  getOzonLastHistoryMessage(messages) {
+    const sorted = [...messages].sort((a, b) => {
+      return this.parseMessageDate(a.created_at || a.createdAt) - this.parseMessageDate(b.created_at || b.createdAt);
+    });
+
+    for (let index = sorted.length - 1; index >= 0; index -= 1) {
+      const msg = sorted[index];
+      const text = this.extractOzonText(msg);
+      if (text) {
+        return {
+          text,
+          createdAt: this.parseMessageDate(msg.created_at || msg.createdAt),
+          senderType: this.getOzonSenderType(msg),
+          customerName: this.getOzonMessageCustomerName(msg, 'Покупатель'),
+        };
+      }
+    }
+
+    return null;
   }
 
   getOzonSortKey(chatData, chatMeta) {
@@ -423,6 +454,70 @@ class OzonSyncService extends MarketplaceSyncService {
     return '';
   }
 
+  collectMediaCandidates(value, bucket = []) {
+    if (!value) return bucket;
+
+    if (typeof value === 'string') {
+      if (/^https?:\/\//i.test(value)) {
+        bucket.push({ url: value });
+      }
+      return bucket;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        this.collectMediaCandidates(item, bucket);
+      }
+      return bucket;
+    }
+
+    if (typeof value !== 'object') return bucket;
+
+    const directUrl = value.url || value.src || value.link || value.href || value.file_url || value.fileUrl || value.original_url || value.originalUrl;
+    if (typeof directUrl === 'string' && /^https?:\/\//i.test(directUrl)) {
+      bucket.push({
+        url: directUrl,
+        thumbnailUrl: value.preview_url || value.previewUrl || value.thumbnail_url || value.thumbnailUrl || null,
+        mimeType: value.mime_type || value.mimeType || value.content_type || value.contentType || null,
+      });
+    }
+
+    for (const nested of Object.values(value)) {
+      this.collectMediaCandidates(nested, bucket);
+    }
+
+    return bucket;
+  }
+
+  getOzonMessageMedia(msg) {
+    const candidates = this.collectMediaCandidates(msg.data || msg.content || msg.message || msg);
+    const imageCandidate = candidates.find((item) => {
+      const source = `${item.mimeType || ''} ${item.url || ''}`.toLowerCase();
+      return source.includes('image') || /\.(jpg|jpeg|png|gif|webp|bmp|heic)(\?|$)/i.test(source);
+    });
+
+    if (imageCandidate) {
+      return {
+        messageType: 'IMAGE',
+        mediaUrl: imageCandidate.url,
+        thumbnailUrl: imageCandidate.thumbnailUrl || imageCandidate.url,
+        mediaMimeType: imageCandidate.mimeType || 'image/*',
+      };
+    }
+
+    const genericCandidate = candidates[0];
+    if (genericCandidate) {
+      return {
+        messageType: 'FILE',
+        mediaUrl: genericCandidate.url,
+        thumbnailUrl: genericCandidate.thumbnailUrl || null,
+        mediaMimeType: genericCandidate.mimeType || null,
+      };
+    }
+
+    return null;
+  }
+
   async syncChats(cabinet, io) {
     try {
       if (!cabinet.apiClientId || !cabinet.apiKey) {
@@ -502,8 +597,10 @@ class OzonSyncService extends MarketplaceSyncService {
           },
         });
 
+        let chatRecord;
+
         if (!existingChat) {
-          await prisma.chat.create({
+          chatRecord = await prisma.chat.create({
             data: {
               cabinetId: cabinet.id,
               conversationType: 'CHAT',
@@ -517,7 +614,7 @@ class OzonSyncService extends MarketplaceSyncService {
             },
           });
         } else {
-          await prisma.chat.update({
+          chatRecord = await prisma.chat.update({
             where: { id: existingChat.id },
             data: {
               customerName,
@@ -542,20 +639,41 @@ class OzonSyncService extends MarketplaceSyncService {
         }
 
         for (const msg of sortedMessages) {
-          const text = this.extractOzonText(msg);
+          const media = this.getOzonMessageMedia(msg);
+          const text = this.extractOzonText(msg) || (media?.messageType === 'IMAGE' ? '📷 Фотография' : media?.messageType === 'FILE' ? '📎 Файл' : '');
           const senderType = this.getOzonSenderType(msg);
           const buyerName = this.getOzonMessageCustomerName(msg, customerName);
 
-          if (text) {
+          if (text || media?.mediaUrl) {
             await this.processIncomingMessage(cabinet, {
               externalChatId,
               customerName: buyerName,
               text,
+              messageType: media?.messageType || 'TEXT',
+              mediaUrl: media?.mediaUrl || null,
+              thumbnailUrl: media?.thumbnailUrl || null,
+              mediaMimeType: media?.mediaMimeType || null,
               externalMsgId: `ozon-msg-${msg.message_id || msg.id}`,
               senderType,
               createdAt: msg.created_at || msg.createdAt,
             }, io);
           }
+        }
+
+        const lastHistoryMessage = this.getOzonLastHistoryMessage(sortedMessages);
+        if (lastHistoryMessage && chatRecord) {
+          await prisma.chat.update({
+            where: { id: chatRecord.id },
+            data: {
+              customerName:
+                chatRecord.customerName && chatRecord.customerName !== 'Покупатель'
+                  ? chatRecord.customerName
+                  : lastHistoryMessage.customerName || chatRecord.customerName,
+              lastMessageText: lastHistoryMessage.text,
+              lastMessageAt: lastHistoryMessage.createdAt,
+              status: 'OPEN',
+            },
+          });
         }
       }
 

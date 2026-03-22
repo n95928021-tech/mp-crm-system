@@ -153,6 +153,10 @@ model ChatMessage {
   senderType     SenderType  @map("sender_type")
   senderId       String?     @map("sender_id")  // userId если от менеджера
   text           String
+  messageType    MessageType @default(TEXT) @map("message_type")
+  mediaUrl       String?     @map("media_url")
+  thumbnailUrl   String?     @map("thumbnail_url")
+  mediaMimeType  String?     @map("media_mime_type")
   externalMsgId  String?     @map("external_msg_id")
   isRead         Boolean     @default(false) @map("is_read")
   createdAt      DateTime    @default(now()) @map("created_at")
@@ -169,6 +173,12 @@ enum SenderType {
   CUSTOMER
   MANAGER
   SYSTEM
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
 }
 
 // ─── Задачи / напоминания ───
