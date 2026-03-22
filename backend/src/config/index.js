@@ -28,6 +28,11 @@ module.exports = {
   marketplaces: {
     wb: {
       baseUrl: process.env.WB_API_BASE_URL || 'https://feedbacks-api.wildberries.ru',
+      chatBaseUrl: process.env.WB_CHAT_API_BASE_URL || 'https://buyer-chat-api.wildberries.ru',
+      chatListPath: process.env.WB_CHAT_LIST_PATH || '/api/v1/seller/chats',
+      chatEventsPath: process.env.WB_CHAT_EVENTS_PATH || '/api/v1/seller/events',
+      chatMessagePath: process.env.WB_CHAT_MESSAGE_PATH || '/api/v1/seller/message',
+      chatDownloadPath: process.env.WB_CHAT_DOWNLOAD_PATH || '/api/v1/seller/download',
       tokens: [
         process.env.WB_CABINET_1_TOKEN,
         process.env.WB_CABINET_2_TOKEN,
@@ -40,6 +45,10 @@ module.exports = {
       baseUrl: process.env.OZON_API_BASE_URL || 'https://api-seller.ozon.ru',
       chatListPath: process.env.OZON_CHAT_LIST_PATH || '/v3/chat/list',
       chatHistoryPath: process.env.OZON_CHAT_HISTORY_PATH || '/v3/chat/history',
+      questionListPath: process.env.OZON_QUESTION_LIST_PATH || '/v1/question/list',
+      questionInfoPath: process.env.OZON_QUESTION_INFO_PATH || '/v1/question/info',
+      questionAnswerListPath: process.env.OZON_QUESTION_ANSWER_LIST_PATH || '/v1/question/answer/list',
+      questionAnswerCreatePath: process.env.OZON_QUESTION_ANSWER_CREATE_PATH || '/v1/question/answer/create',
       cabinets: [1, 2, 3, 4].map((i) => ({
         clientId: process.env[`OZON_CABINET_${i}_CLIENT_ID`],
         apiKey: process.env[`OZON_CABINET_${i}_API_KEY`],

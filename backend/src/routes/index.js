@@ -33,6 +33,7 @@ router.put('/cabinets/:cabinetId', authenticate, authorize('ADMIN'), marketplace
 // ─── Chats ───
 router.get('/chats', authenticate, chatController.useChats, chatController.getChats);
 router.get('/chats/:chatId', authenticate, chatController.useChats, chatController.getChatById);
+router.get('/chats/:chatId/messages/:messageId/media', authenticate, chatController.useChats, chatController.getMessageMedia);
 router.post('/chats/:chatId/messages', authenticate, chatController.useChats, chatController.sendMessage);
 router.patch('/chats/:chatId/read', authenticate, chatController.useChats, chatController.markAsRead);
 router.patch('/chats/:chatId/assign', authenticate, chatController.useChats, chatController.assignManager);
@@ -41,6 +42,7 @@ router.patch('/chats/:chatId/status', authenticate, chatController.useChats, cha
 // ─── Questions ───
 router.get('/questions', authenticate, chatController.useQuestions, chatController.getChats);
 router.get('/questions/:chatId', authenticate, chatController.useQuestions, chatController.getChatById);
+router.get('/questions/:chatId/messages/:messageId/media', authenticate, chatController.useQuestions, chatController.getMessageMedia);
 router.post('/questions/:chatId/messages', authenticate, chatController.useQuestions, chatController.sendMessage);
 router.patch('/questions/:chatId/read', authenticate, chatController.useQuestions, chatController.markAsRead);
 router.patch('/questions/:chatId/assign', authenticate, chatController.useQuestions, chatController.assignManager);

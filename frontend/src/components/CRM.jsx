@@ -279,6 +279,123 @@ const getMessagePreview = (message) => {
   return message.text || "";
 };
 
+const extractMarkdownMedia = (text) => {
+  if (!text || typeof text !== "string") return null;
+  const imageMatch = text.match(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i);
+  if (imageMatch?.[1]) {
+    return { type: "IMAGE", url: imageMatch[1] };
+  }
+  const fileMatch = text.match(/\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i);
+  if (fileMatch?.[1]) {
+    return { type: "FILE", url: fileMatch[1] };
+  }
+  return null;
+};
+
+const stripMarkdownMedia = (text) => {
+  if (!text || typeof text !== "string") return text;
+  return text
+    .replace(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi, "")
+    .replace(/\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi, "")
+    .trim();
+};
+
+const buildMessageMediaSrc = (apiUrl, kind, conversationId, marketplaceId, message) => {
+  if (!message?.id || !apiUrl) return message?.thumbnailUrl || message?.mediaUrl || null;
+  if (marketplaceId !== "ozon") return message?.thumbnailUrl || message?.mediaUrl || null;
+  if (String(message.id).startsWith("preview-")) return message?.thumbnailUrl || message?.mediaUrl || null;
+  return `${apiUrl}/${kind}/${conversationId}/messages/${message.id}/media`;
+};
+
+const AuthenticatedImage = ({ src, alt, getHeaders, style }) => {
+  const [blobUrl, setBlobUrl] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let revokedUrl = null;
+    let cancelled = false;
+
+    const load = async () => {
+      if (!src) {
+        setBlobUrl(null);
+        setLoading(false);
+        setFailed(true);
+        return;
+      }
+
+      setLoading(true);
+      setFailed(false);
+
+      try {
+        const response = await fetch(src, { headers: getHeaders ? getHeaders() : {} });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        if (cancelled) return;
+
+        revokedUrl = URL.createObjectURL(blob);
+        setBlobUrl(revokedUrl);
+        setLoading(false);
+      } catch (_error) {
+        if (cancelled) return;
+        setFailed(true);
+        setLoading(false);
+      }
+    };
+
+    load();
+
+    return () => {
+      cancelled = true;
+      if (revokedUrl) URL.revokeObjectURL(revokedUrl);
+    };
+  }, [src, getHeaders]);
+
+  if (loading) {
+    return (
+      <div style={{
+        ...style,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(255,255,255,0.05)",
+        color: "#94a3b8",
+        fontSize: 13,
+      }}>
+        Загрузка фото...
+      </div>
+    );
+  }
+
+  if (failed || !blobUrl) {
+    return (
+      <div style={{
+        ...style,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(255,255,255,0.05)",
+        color: "#cbd5e1",
+        fontSize: 13,
+      }}>
+        📷 Фотография
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={blobUrl}
+      alt={alt}
+      style={style}
+      onClick={() => window.open(blobUrl, "_blank", "noopener,noreferrer")}
+    />
+  );
+};
+
 // ─── Timer Progress Bar Component ───
 const TimerBar = ({ lastMessageTime }) => {
   const [elapsed, setElapsed] = useState(0);
@@ -1148,6 +1265,17 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const conversationsLoading = isQuestionsView ? questionsLoading : chatsLoading;
   const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
   const totalQuestionsUnread = questions.reduce((s, c) => s + (c.unread || 0), 0);
+  const isQuestionsNav = activeView === "questions";
+  const getMarketplaceBadgeValue = (marketplaceId) => {
+    const source = isQuestionsNav ? questions : chats;
+    const unread = source
+      .filter((c) => c.marketplaceId === marketplaceId && c.unread > 0)
+      .reduce((s, c) => s + c.unread, 0);
+    if (unread > 0) return unread;
+
+    const total = source.filter((c) => c.marketplaceId === marketplaceId).length;
+    return total;
+  };
   const getMarketplace = (id) => marketplaces.find((m) => m.id === id);
   const getCabinet = (id) => {
     for (const mp of marketplaces) {
@@ -2365,7 +2493,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                 {mp.icon()}
                 <span>{mp.name}</span>
                 <span style={{ ...S.badge(mp.color), marginLeft: "auto", fontSize: 9 }}>
-                  {chats.filter(c => c.marketplaceId === mp.id && c.unread > 0).reduce((s,c) => s + c.unread, 0) || mp.cabinets.length}
+                  {getMarketplaceBadgeValue(mp.id) || mp.cabinets.length}
                 </span>
               </button>
               {selectedMarketplace === mp.id &&
@@ -2797,7 +2925,25 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     lastMessageTime={currentConversation.lastMessageTime}
                     unreadCount={currentConversation.unread || 0}
                   />
-                  {visibleMessages.map((msg, i) => (
+                  {visibleMessages.map((msg, i) => {
+                    const fallbackMedia = !msg.mediaUrl ? extractMarkdownMedia(msg.text) : null;
+                    const directMediaUrl = msg.mediaUrl || fallbackMedia?.url || null;
+                    const resolvedMessageType = msg.messageType !== "TEXT" ? msg.messageType : (fallbackMedia?.type || "TEXT");
+                    const resolvedText = fallbackMedia
+                      ? (stripMarkdownMedia(msg.text) || (resolvedMessageType === "IMAGE" ? "📷 Фотография" : "📎 Файл"))
+                      : msg.text;
+                    const proxyMediaUrl = directMediaUrl
+                      ? buildMessageMediaSrc(
+                          apiUrl,
+                          isQuestionsView ? "questions" : "chats",
+                          currentConversation.id,
+                          currentConversation.marketplaceId,
+                          { ...msg, mediaUrl: directMediaUrl, thumbnailUrl: msg.thumbnailUrl || directMediaUrl }
+                        )
+                      : null;
+                    const resolvedMediaUrl = proxyMediaUrl || directMediaUrl;
+
+                    return (
                     <div
                       key={msg.id}
                       style={{
@@ -2822,11 +2968,12 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                           lineHeight: 1.5,
                         }}
                       >
-                        {msg.mediaUrl && msg.messageType === "IMAGE" && (
-                          <div style={{ marginBottom: msg.text ? 10 : 0 }}>
-                            <img
-                              src={msg.thumbnailUrl || msg.mediaUrl}
+                        {resolvedMediaUrl && resolvedMessageType === "IMAGE" && (
+                          <div style={{ marginBottom: resolvedText ? 10 : 0 }}>
+                            <AuthenticatedImage
+                              src={resolvedMediaUrl}
                               alt="Вложение"
+                              getHeaders={getHeaders}
                               style={{
                                 display: "block",
                                 maxWidth: "100%",
@@ -2835,13 +2982,12 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                                 objectFit: "cover",
                                 cursor: "pointer",
                               }}
-                              onClick={() => window.open(msg.mediaUrl, "_blank", "noopener,noreferrer")}
                             />
                           </div>
                         )}
-                        {msg.mediaUrl && msg.messageType === "FILE" && (
+                        {resolvedMediaUrl && resolvedMessageType === "FILE" && (
                           <a
-                            href={msg.mediaUrl}
+                            href={resolvedMediaUrl}
                             target="_blank"
                             rel="noreferrer"
                             style={{
@@ -2850,14 +2996,14 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                               gap: 6,
                               color: msg.from === "manager" ? "#fff" : "#93c5fd",
                               textDecoration: "none",
-                              marginBottom: msg.text ? 8 : 0,
+                              marginBottom: resolvedText ? 8 : 0,
                             }}
                           >
                             <span>📎</span>
                             <span>Открыть файл</span>
                           </a>
                         )}
-                        {msg.text}
+                        {resolvedText}
                         <div
                           style={{
                             fontSize: 10,
@@ -2873,7 +3019,8 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                         </div>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                   {currentConversation.messages?.length === 0 && currentConversation.lastMessage && (
                     <div style={{ position: "relative", zIndex: 1, marginTop: 8, fontSize: 11, color: "#64748b" }}>
                       Полная история пока не загрузилась, поэтому показываем последнее сообщение из списка чатов.

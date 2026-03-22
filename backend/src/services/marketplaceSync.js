@@ -29,6 +29,45 @@ class MarketplaceSyncService {
     throw new Error('syncChats() не реализован');
   }
 
+  async syncQuestions(_cabinet, _io) {
+    return null;
+  }
+
+  extractMarkdownMedia(text) {
+    if (!text || typeof text !== 'string') return null;
+
+    const imageMatch = text.match(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i);
+    if (imageMatch?.[1]) {
+      const url = imageMatch[1];
+      return {
+        messageType: 'IMAGE',
+        mediaUrl: url,
+        thumbnailUrl: url,
+        mediaMimeType: /\.(jpg|jpeg|png|gif|webp|bmp|heic)(\?|$)/i.test(url) ? 'image/*' : null,
+      };
+    }
+
+    const fileMatch = text.match(/\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i);
+    if (fileMatch?.[1]) {
+      return {
+        messageType: 'FILE',
+        mediaUrl: fileMatch[1],
+        thumbnailUrl: null,
+        mediaMimeType: null,
+      };
+    }
+
+    return null;
+  }
+
+  stripMarkdownMedia(text) {
+    if (!text || typeof text !== 'string') return text;
+    return text
+      .replace(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi, '')
+      .replace(/\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi, '')
+      .trim();
+  }
+
   async sendMessage(cabinet, externalChatId, text) {
     throw new Error('sendMessage() не реализован');
   }
@@ -76,7 +115,38 @@ class MarketplaceSyncService {
       const existing = await prisma.chatMessage.findFirst({
         where: { chatId: chat.id, externalMsgId },
       });
-      if (existing) return null;
+      if (existing) {
+        const inferredMedia = mediaUrl
+          ? { messageType, mediaUrl, thumbnailUrl, mediaMimeType }
+          : this.extractMarkdownMedia(existing.text || text);
+        const normalizedText = this.stripMarkdownMedia(text || existing.text) || (
+          inferredMedia?.messageType === 'IMAGE' ? '📷 Фотография' :
+          inferredMedia?.messageType === 'FILE' ? '📎 Файл' :
+          existing.text
+        );
+
+        if (
+          inferredMedia &&
+          (
+            !existing.mediaUrl ||
+            existing.messageType === 'TEXT' ||
+            existing.text !== normalizedText
+          )
+        ) {
+          await prisma.chatMessage.update({
+            where: { id: existing.id },
+            data: {
+              text: normalizedText,
+              messageType: inferredMedia.messageType,
+              mediaUrl: inferredMedia.mediaUrl,
+              thumbnailUrl: inferredMedia.thumbnailUrl,
+              mediaMimeType: inferredMedia.mediaMimeType,
+            },
+          });
+        }
+
+        return null;
+      }
     }
 
     // Создаём сообщение
@@ -124,6 +194,11 @@ class WildberriesSyncService extends MarketplaceSyncService {
   constructor() {
     super('Wildberries');
     this.baseUrl = config.marketplaces.wb.baseUrl;
+    this.chatBaseUrl = config.marketplaces.wb.chatBaseUrl;
+    this.chatListPath = config.marketplaces.wb.chatListPath;
+    this.chatEventsPath = config.marketplaces.wb.chatEventsPath;
+    this.chatMessagePath = config.marketplaces.wb.chatMessagePath;
+    this.chatDownloadPath = config.marketplaces.wb.chatDownloadPath;
   }
 
   async syncChats(cabinet, io) {
@@ -133,8 +208,133 @@ class WildberriesSyncService extends MarketplaceSyncService {
         return;
       }
 
-      // WB API: Получение вопросов/чатов
-      // Документация: https://openapi.wildberries.ru/
+      const response = await axios.get(`${this.chatBaseUrl}${this.chatListPath}`, {
+        headers: { Authorization: cabinet.apiToken },
+        timeout: 10000,
+      });
+
+      const chats = response.data?.data?.chats || response.data?.chats || response.data?.data || response.data || [];
+      const normalizedChats = Array.isArray(chats) ? chats : [];
+      logger.info(`WB ${cabinet.name}: chat list returned ${normalizedChats.length} items`);
+      if (normalizedChats[0]) {
+        logger.debug(`WB ${cabinet.name}: sample chat payload ${JSON.stringify(normalizedChats[0]).slice(0, 2500)}`);
+      }
+
+      const events = await this.fetchWbEvents(cabinet, normalizedChats[0] ? cabinet.name : null);
+      if (events[0]) {
+        logger.debug(`WB ${cabinet.name}: sample event payload ${JSON.stringify(events[0]).slice(0, 2500)}`);
+      }
+
+      const eventsByChatId = new Map();
+      for (const event of events) {
+        const chatId = this.getWbEventChatId(event);
+        if (!chatId) continue;
+        if (!eventsByChatId.has(chatId)) eventsByChatId.set(chatId, []);
+        eventsByChatId.get(chatId).push(event);
+      }
+
+      for (const chatData of normalizedChats) {
+        const chatId = this.getWbChatId(chatData);
+        if (!chatId) continue;
+
+        const externalChatId = `wb-chat-${chatId}`;
+        const customerName = this.getWbChatCustomerName(chatData);
+        const replySign = this.getWbChatReplySign(chatData);
+        const unreadCount = this.getWbChatUnreadCount(chatData);
+        const lastMessageText = this.getWbChatLastMessageText(chatData);
+        const lastMessageAt = this.getWbChatLastMessageAt(chatData);
+
+        const existingChat = await prisma.chat.findFirst({
+          where: {
+            cabinetId: cabinet.id,
+            externalChatId,
+            conversationType: 'CHAT',
+          },
+        });
+
+        let chatRecord;
+        if (!existingChat) {
+          chatRecord = await prisma.chat.create({
+            data: {
+              cabinetId: cabinet.id,
+              conversationType: 'CHAT',
+              externalChatId,
+              customerName,
+              customerExternalId: replySign || null,
+              status: 'OPEN',
+              unreadCount,
+              lastMessageText,
+              lastMessageAt,
+            },
+          });
+        } else {
+          chatRecord = await prisma.chat.update({
+            where: { id: existingChat.id },
+            data: {
+              customerName,
+              customerExternalId: replySign || existingChat.customerExternalId,
+              unreadCount,
+              lastMessageText: lastMessageText || existingChat.lastMessageText,
+              lastMessageAt: lastMessageAt || existingChat.lastMessageAt,
+              status: 'OPEN',
+            },
+          });
+        }
+
+        const chatEvents = (eventsByChatId.get(chatId) || []).sort((a, b) => {
+          return this.parseMessageDate(this.getWbEventCreatedAt(a)) - this.parseMessageDate(this.getWbEventCreatedAt(b));
+        });
+
+        for (const event of chatEvents) {
+          const media = this.getWbEventMedia(event);
+          const text = this.getWbEventText(event) || (media?.messageType === 'IMAGE' ? '📷 Фотография' : media?.messageType === 'FILE' ? '📎 Файл' : '');
+          if (!text && !media?.mediaUrl) continue;
+
+          await this.processIncomingMessage(cabinet, {
+            externalChatId,
+            customerName: this.getWbEventCustomerName(event) || customerName,
+            text,
+            messageType: media?.messageType || 'TEXT',
+            mediaUrl: media?.mediaUrl || null,
+            thumbnailUrl: media?.thumbnailUrl || null,
+            mediaMimeType: media?.mediaMimeType || null,
+            externalMsgId: `wb-chat-event-${this.getWbEventId(event) || `${chatId}-${this.getWbEventCreatedAt(event)}`}`,
+            conversationType: 'CHAT',
+            senderType: this.getWbEventSenderType(event),
+            createdAt: this.getWbEventCreatedAt(event),
+          }, io);
+        }
+
+        const lastEvent = chatEvents[chatEvents.length - 1];
+        if (lastEvent && chatRecord) {
+          await prisma.chat.update({
+            where: { id: chatRecord.id },
+            data: {
+              lastMessageText: this.getWbEventText(lastEvent) || chatRecord.lastMessageText,
+              lastMessageAt: this.parseMessageDate(this.getWbEventCreatedAt(lastEvent)),
+            },
+          });
+        }
+      }
+
+      await prisma.cabinet.update({
+        where: { id: cabinet.id },
+        data: { lastSyncAt: new Date() },
+      });
+
+      logger.info(`WB ${cabinet.name}: синхронизировано ${normalizedChats.length} чатов`);
+    } catch (error) {
+      logger.error(`WB ${cabinet.name} ошибка синхронизации чатов: ${error.message} | response: ${JSON.stringify(error.response?.data)}`);
+    }
+  }
+
+  async syncQuestions(cabinet, io) {
+    try {
+      if (!cabinet.apiToken) {
+        logger.warn(`WB кабинет ${cabinet.name}: API токен не настроен`);
+        return;
+      }
+
       const response = await axios.get(`${this.baseUrl}/api/v1/questions`, {
         headers: { Authorization: cabinet.apiToken },
         params: {
@@ -171,7 +371,6 @@ class WildberriesSyncService extends MarketplaceSyncService {
         }
       }
 
-      // Обновляем время синхронизации
       await prisma.cabinet.update({
         where: { id: cabinet.id },
         data: { lastSyncAt: new Date() },
@@ -179,13 +378,47 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
       logger.info(`WB ${cabinet.name}: синхронизировано ${questions.length} вопросов`);
     } catch (error) {
-      logger.error(`WB ${cabinet.name} ошибка синхронизации: ${error.message} | response: ${JSON.stringify(error.response?.data)}`);
+      logger.error(`WB ${cabinet.name} ошибка синхронизации вопросов: ${error.message} | response: ${JSON.stringify(error.response?.data)}`);
     }
   }
 
-  async sendMessage(cabinet, externalChatId, text) {
+  async sendMessage(cabinet, externalChatId, text, context = {}) {
     try {
-      // WB API: Ответ на вопрос
+      if (externalChatId.startsWith('wb-chat-')) {
+        const chatId = externalChatId.replace('wb-chat-', '');
+        let replySign = context.chat?.customerExternalId || null;
+
+        if (!replySign) {
+          const listResponse = await axios.get(`${this.chatBaseUrl}${this.chatListPath}`, {
+            headers: { Authorization: cabinet.apiToken },
+            timeout: 10000,
+          });
+          const chats = listResponse.data?.data?.chats || listResponse.data?.chats || listResponse.data?.data || listResponse.data || [];
+          const matchedChat = (Array.isArray(chats) ? chats : []).find((item) => this.getWbChatId(item) === chatId);
+          replySign = this.getWbChatReplySign(matchedChat);
+        }
+
+        if (!replySign) {
+          throw new Error(`Для WB чата ${chatId} не найден replySign`);
+        }
+
+        const formData = new FormData();
+        formData.append('replySign', replySign);
+        formData.append('message', text);
+
+        await axios.post(
+          `${this.chatBaseUrl}${this.chatMessagePath}`,
+          formData,
+          {
+            headers: {
+              Authorization: cabinet.apiToken,
+            },
+            timeout: 10000,
+          }
+        );
+        return true;
+      }
+
       const questionId = externalChatId.replace('wb-q-', '');
       await axios.patch(
         `${this.baseUrl}/api/v1/questions`,
@@ -205,6 +438,208 @@ class WildberriesSyncService extends MarketplaceSyncService {
       return false;
     }
   }
+
+  getWbChatId(chatData) {
+    return String(chatData?.chatID || chatData?.chatId || chatData?.id || '');
+  }
+
+  getWbChatReplySign(chatData) {
+    return chatData?.replySign || chatData?.reply_sign || chatData?.replysign || null;
+  }
+
+  getWbChatCustomerName(chatData) {
+    return (
+      chatData?.clientName ||
+      chatData?.client_name ||
+      chatData?.userName ||
+      chatData?.name ||
+      'Покупатель WB'
+    );
+  }
+
+  getWbChatUnreadCount(chatData) {
+    return Number(
+      chatData?.unreadCount ||
+      chatData?.unansweredCount ||
+      chatData?.newMessagesCount ||
+      chatData?.countUnread ||
+      0
+    ) || 0;
+  }
+
+  getWbChatLastMessageText(chatData) {
+    const lastMessage = chatData?.lastMessage || chatData?.last_message || chatData?.message || null;
+    if (typeof lastMessage === 'string') return lastMessage;
+    return (
+      lastMessage?.text ||
+      lastMessage?.message ||
+      chatData?.text ||
+      ''
+    );
+  }
+
+  getWbChatLastMessageAt(chatData) {
+    return (
+      chatData?.lastMessageDate ||
+      chatData?.last_message_date ||
+      chatData?.lastMessageAt ||
+      chatData?.updatedAt ||
+      chatData?.createdAt ||
+      new Date()
+    );
+  }
+
+  getWbEventId(event) {
+    return event?.eventID || event?.eventId || event?.id || event?.messageID || event?.messageId || null;
+  }
+
+  getWbEventChatId(event) {
+    const raw = event?.chatID || event?.chatId || event?.chat?.id || event?.chat?.chatID || null;
+    return raw ? String(raw) : null;
+  }
+
+  getWbEventCreatedAt(event) {
+    return (
+      event?.createdAt ||
+      event?.createdDate ||
+      event?.dateTime ||
+      event?.date ||
+      event?.timestamp ||
+      new Date()
+    );
+  }
+
+  getWbEventCustomerName(event) {
+    return (
+      event?.clientName ||
+      event?.client_name ||
+      event?.userName ||
+      event?.authorName ||
+      event?.name ||
+      null
+    );
+  }
+
+  getWbEventText(event) {
+    const value = (
+      event?.text ||
+      event?.message ||
+      event?.body ||
+      event?.content?.text ||
+      event?.payload?.text ||
+      ''
+    );
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  getWbEventSenderType(event) {
+    const raw = (
+      event?.senderType ||
+      event?.sender ||
+      event?.authorType ||
+      event?.author ||
+      event?.userType ||
+      ''
+    ).toString().toLowerCase();
+
+    if (
+      raw.includes('seller') ||
+      raw.includes('manager') ||
+      raw.includes('operator') ||
+      raw.includes('employee')
+    ) {
+      return 'MANAGER';
+    }
+
+    return 'CUSTOMER';
+  }
+
+  getWbEventMedia(event) {
+    const candidates = [];
+    const scan = (value) => {
+      if (!value) return;
+      if (Array.isArray(value)) {
+        value.forEach(scan);
+        return;
+      }
+      if (typeof value !== 'object') return;
+
+      const url = value.url || value.src || value.link || null;
+      const downloadId = value.downloadID || value.downloadId || value.fileId || value.fileID || null;
+      const fileName = value.fileName || value.name || value.filename || '';
+
+      if (url || downloadId) {
+        candidates.push({ url, downloadId, fileName });
+      }
+
+      Object.values(value).forEach((nested) => {
+        if (nested && typeof nested === 'object') scan(nested);
+      });
+    };
+
+    scan(event?.attachments);
+    scan(event?.attachment);
+    scan(event?.files);
+    scan(event?.images);
+    scan(event?.content);
+    scan(event?.payload);
+
+    const mediaCandidate = candidates.find((candidate) => candidate.url || candidate.downloadId);
+    if (!mediaCandidate) return null;
+
+    const mediaUrl = mediaCandidate.url || `${this.chatBaseUrl}${this.chatDownloadPath}/${mediaCandidate.downloadId}`;
+    const isImage = /\.(jpg|jpeg|png|gif|webp|bmp|heic)(\?|$)/i.test(mediaUrl) || /\.(jpg|jpeg|png|gif|webp|bmp|heic)$/i.test(mediaCandidate.fileName || '');
+
+    return {
+      messageType: isImage ? 'IMAGE' : 'FILE',
+      mediaUrl,
+      thumbnailUrl: isImage ? mediaUrl : null,
+      mediaMimeType: isImage ? 'image/*' : null,
+    };
+  }
+
+  async fetchWbEvents(cabinet, debugLabel = null) {
+    const headers = { Authorization: cabinet.apiToken };
+    const collected = [];
+    const seen = new Set();
+    let next = null;
+    let page = 0;
+    const maxPages = 20;
+
+    while (page < maxPages) {
+      const response = await axios.get(`${this.chatBaseUrl}${this.chatEventsPath}`, {
+        headers,
+        params: next ? { next } : {},
+        timeout: 10000,
+      });
+
+      const payload = response.data?.data || response.data?.result || response.data || {};
+      const events = payload?.events || payload?.items || payload?.messages || [];
+      const normalizedEvents = Array.isArray(events) ? events : [];
+      const nextCursor = payload?.next || payload?.nextCursor || payload?.cursor?.next || null;
+
+      if (debugLabel) {
+        logger.debug(`WB events ${debugLabel}: page ${page + 1}, next=${next || 'null'}, batch=${normalizedEvents.length}`);
+      }
+
+      if (!normalizedEvents.length) break;
+
+      let added = 0;
+      for (const event of normalizedEvents) {
+        const eventId = this.getWbEventId(event) || `${this.getWbEventChatId(event)}-${this.getWbEventCreatedAt(event)}`;
+        if (seen.has(eventId)) continue;
+        seen.add(eventId);
+        collected.push(event);
+        added += 1;
+      }
+
+      if (!nextCursor || added === 0) break;
+      next = nextCursor;
+      page += 1;
+    }
+
+    return collected;
+  }
 }
 
 // ─── Ozon ───
@@ -214,6 +649,10 @@ class OzonSyncService extends MarketplaceSyncService {
     this.baseUrl = config.marketplaces.ozon.baseUrl;
     this.chatListPath = config.marketplaces.ozon.chatListPath;
     this.chatHistoryPath = config.marketplaces.ozon.chatHistoryPath;
+    this.questionListPath = config.marketplaces.ozon.questionListPath;
+    this.questionInfoPath = config.marketplaces.ozon.questionInfoPath;
+    this.questionAnswerListPath = config.marketplaces.ozon.questionAnswerListPath;
+    this.questionAnswerCreatePath = config.marketplaces.ozon.questionAnswerCreatePath;
   }
 
   getOzonChatId(chatData, chatMeta) {
@@ -490,6 +929,9 @@ class OzonSyncService extends MarketplaceSyncService {
   }
 
   getOzonMessageMedia(msg) {
+    const markdownMedia = this.extractMarkdownMedia(this.extractOzonText(msg));
+    if (markdownMedia) return markdownMedia;
+
     const candidates = this.collectMediaCandidates(msg.data || msg.content || msg.message || msg);
     const imageCandidate = candidates.find((item) => {
       const source = `${item.mimeType || ''} ${item.url || ''}`.toLowerCase();
@@ -516,6 +958,211 @@ class OzonSyncService extends MarketplaceSyncService {
     }
 
     return null;
+  }
+
+  getOzonQuestionId(item) {
+    return item?.question_id || item?.questionId || item?.id || item?.question?.id || null;
+  }
+
+  getOzonQuestionCustomerName(item) {
+    return (
+      item?.author_name ||
+      item?.authorName ||
+      item?.author?.name ||
+      item?.customer_name ||
+      item?.user_name ||
+      item?.userName ||
+      item?.profile_name ||
+      'Покупатель'
+    );
+  }
+
+  getOzonQuestionText(item) {
+    const raw = (
+      item?.text ||
+      item?.question_text ||
+      item?.questionText ||
+      item?.question ||
+      item?.content ||
+      item?.body ||
+      item?.message ||
+      ''
+    );
+
+    if (Array.isArray(raw)) return raw.filter(Boolean).join('\n').trim();
+    if (typeof raw === 'object' && raw !== null) {
+      return raw.text || raw.value || raw.content || '';
+    }
+    return String(raw || '').trim();
+  }
+
+  getOzonQuestionCreatedAt(item) {
+    return (
+      item?.created_at ||
+      item?.createdAt ||
+      item?.published_at ||
+      item?.publishedAt ||
+      item?.updated_at ||
+      item?.updatedAt ||
+      new Date().toISOString()
+    );
+  }
+
+  normalizeOzonAnswerSenderType(answer) {
+    const sender = `${answer?.author_type || answer?.authorType || answer?.sender_type || answer?.senderType || ''}`.toLowerCase();
+    if (sender.includes('seller') || sender.includes('manager') || sender.includes('vendor')) return 'MANAGER';
+    return 'MANAGER';
+  }
+
+  getOzonAnswerText(answer) {
+    const raw = answer?.text || answer?.answer_text || answer?.answerText || answer?.content || answer?.message || '';
+    if (Array.isArray(raw)) return raw.filter(Boolean).join('\n').trim();
+    if (typeof raw === 'object' && raw !== null) return raw.text || raw.value || raw.content || '';
+    return String(raw || '').trim();
+  }
+
+  getOzonAnswerCreatedAt(answer, fallback = null) {
+    return (
+      answer?.created_at ||
+      answer?.createdAt ||
+      answer?.published_at ||
+      answer?.publishedAt ||
+      answer?.updated_at ||
+      answer?.updatedAt ||
+      fallback ||
+      new Date().toISOString()
+    );
+  }
+
+  async fetchOzonQuestionDetails(cabinet, questionId) {
+    const headers = {
+      'Client-Id': cabinet.apiClientId,
+      'Api-Key': cabinet.apiKey,
+    };
+
+    let info = null;
+    let answers = [];
+
+    try {
+      const infoResp = await axios.post(
+        `${this.baseUrl}${this.questionInfoPath}`,
+        { question_id: questionId },
+        { headers, timeout: 10000 }
+      );
+
+      info = infoResp.data?.result?.question || infoResp.data?.result || infoResp.data?.question || infoResp.data || null;
+    } catch (error) {
+      logger.warn(`Ozon ${cabinet.name}: не удалось получить info вопроса ${questionId}: ${error.response?.status || ''} ${error.message}`);
+    }
+
+    try {
+      const answerResp = await axios.post(
+        `${this.baseUrl}${this.questionAnswerListPath}`,
+        { question_id: questionId },
+        { headers, timeout: 10000 }
+      );
+
+      answers = answerResp.data?.result?.answers || answerResp.data?.answers || answerResp.data?.result || [];
+      if (!Array.isArray(answers)) answers = [];
+    } catch (error) {
+      logger.warn(`Ozon ${cabinet.name}: не удалось получить ответы вопроса ${questionId}: ${error.response?.status || ''} ${error.message}`);
+    }
+
+    return { info, answers };
+  }
+
+  async syncQuestions(cabinet, io) {
+    try {
+      if (!cabinet.apiClientId || !cabinet.apiKey) {
+        logger.warn(`Ozon кабинет ${cabinet.name}: API не настроен`);
+        return;
+      }
+
+      const headers = {
+        'Client-Id': cabinet.apiClientId,
+        'Api-Key': cabinet.apiKey,
+      };
+
+      const response = await axios.post(
+        `${this.baseUrl}${this.questionListPath}`,
+        { limit: 100 },
+        { headers, timeout: 10000 }
+      );
+
+      const questions =
+        response.data?.result?.questions ||
+        response.data?.questions ||
+        response.data?.result?.items ||
+        response.data?.items ||
+        [];
+
+      logger.info(`Ozon ${cabinet.name}: question list returned ${questions.length} items`);
+      if (questions[0]) {
+        logger.debug(`Ozon ${cabinet.name}: sample question payload ${JSON.stringify(questions[0]).slice(0, 2500)}`);
+      }
+
+      for (const rawQuestion of questions) {
+        const questionId = this.getOzonQuestionId(rawQuestion);
+        if (!questionId) continue;
+
+        const { info, answers } = await this.fetchOzonQuestionDetails(cabinet, questionId);
+        if (info) {
+          logger.debug(`Ozon ${cabinet.name}: question ${questionId} info ${JSON.stringify(info).slice(0, 2500)}`);
+        }
+        if (answers[0]) {
+          logger.debug(`Ozon ${cabinet.name}: question ${questionId} sample answer ${JSON.stringify(answers[0]).slice(0, 2500)}`);
+        }
+        const question = info || rawQuestion;
+        const customerName = this.getOzonQuestionCustomerName(question);
+        const questionText = this.getOzonQuestionText(question);
+        const questionCreatedAt = this.getOzonQuestionCreatedAt(question);
+        const externalChatId = `ozon-q-${questionId}`;
+
+        if (questionText) {
+          await this.processIncomingMessage(cabinet, {
+            externalChatId,
+            customerName,
+            text: questionText,
+            externalMsgId: `ozon-question-${questionId}`,
+            conversationType: 'QUESTION',
+            senderType: 'CUSTOMER',
+            createdAt: questionCreatedAt,
+          }, io);
+        }
+
+        const embeddedAnswers = [];
+        const directAnswerText = question?.answer_text || question?.answerText || question?.answer?.text || question?.answer;
+        if (directAnswerText) {
+          embeddedAnswers.push({
+            id: question?.answer_id || question?.answerId || `${questionId}-embedded`,
+            text: directAnswerText,
+            created_at: question?.answer_created_at || question?.answerCreatedAt || question?.updated_at || question?.updatedAt || questionCreatedAt,
+            author_type: 'seller',
+          });
+        }
+
+        const mergedAnswers = [...embeddedAnswers, ...answers];
+        for (const answer of mergedAnswers) {
+          const answerText = this.getOzonAnswerText(answer);
+          if (!answerText) continue;
+
+          const answerId = answer?.answer_id || answer?.answerId || answer?.id || `${questionId}-${this.getOzonAnswerCreatedAt(answer, questionCreatedAt)}`;
+          await this.processIncomingMessage(cabinet, {
+            externalChatId,
+            customerName,
+            text: answerText,
+            externalMsgId: `ozon-question-answer-${answerId}`,
+            conversationType: 'QUESTION',
+            senderType: this.normalizeOzonAnswerSenderType(answer),
+            createdAt: this.getOzonAnswerCreatedAt(answer, questionCreatedAt),
+          }, io);
+        }
+      }
+
+      logger.info(`Ozon ${cabinet.name}: синхронизировано ${questions.length} вопросов`);
+    } catch (error) {
+      logger.error(`Ozon ${cabinet.name} ошибка синхронизации вопросов: ${error.message} | status: ${error.response?.status} | response: ${JSON.stringify(error.response?.data)}`);
+    }
   }
 
   async syncChats(cabinet, io) {
@@ -640,7 +1287,9 @@ class OzonSyncService extends MarketplaceSyncService {
 
         for (const msg of sortedMessages) {
           const media = this.getOzonMessageMedia(msg);
-          const text = this.extractOzonText(msg) || (media?.messageType === 'IMAGE' ? '📷 Фотография' : media?.messageType === 'FILE' ? '📎 Файл' : '');
+          const rawText = this.extractOzonText(msg);
+          const cleanText = this.stripMarkdownMedia(rawText);
+          const text = cleanText || (media?.messageType === 'IMAGE' ? '📷 Фотография' : media?.messageType === 'FILE' ? '📎 Файл' : '');
           const senderType = this.getOzonSenderType(msg);
           const buyerName = this.getOzonMessageCustomerName(msg, customerName);
 
@@ -690,6 +1339,22 @@ class OzonSyncService extends MarketplaceSyncService {
 
   async sendMessage(cabinet, externalChatId, text) {
     try {
+      if (externalChatId.startsWith('ozon-q-')) {
+        const questionId = externalChatId.replace('ozon-q-', '');
+        await axios.post(
+          `${this.baseUrl}${this.questionAnswerCreatePath}`,
+          { question_id: questionId, text },
+          {
+            headers: {
+              'Client-Id': cabinet.apiClientId,
+              'Api-Key': cabinet.apiKey,
+            },
+            timeout: 10000,
+          }
+        );
+        return true;
+      }
+
       const chatId = externalChatId.replace('ozon-', '');
       await axios.post(
         `${this.baseUrl}/v1/chat/send/message`,
@@ -880,7 +1545,21 @@ const syncAllMarketplaces = async (io) => {
     if (!service) continue;
 
     try {
+      if (cabinet.marketplace.slug === 'ozon' && typeof service.syncQuestions === 'function') {
+        logger.info(`Запуск синхронизации вопросов: ${cabinet.marketplace.name} ${cabinet.name}`);
+        await service.syncQuestions(cabinet, io);
+        logger.info(`Завершена синхронизация вопросов: ${cabinet.marketplace.name} ${cabinet.name}`);
+      }
+
+      logger.info(`Запуск синхронизации чатов: ${cabinet.marketplace.name} ${cabinet.name}`);
       await service.syncChats(cabinet, io);
+      logger.info(`Завершена синхронизация чатов: ${cabinet.marketplace.name} ${cabinet.name}`);
+
+      if (cabinet.marketplace.slug !== 'ozon' && typeof service.syncQuestions === 'function') {
+        logger.info(`Запуск синхронизации вопросов: ${cabinet.marketplace.name} ${cabinet.name}`);
+        await service.syncQuestions(cabinet, io);
+        logger.info(`Завершена синхронизация вопросов: ${cabinet.marketplace.name} ${cabinet.name}`);
+      }
     } catch (error) {
       logger.error(`Ошибка ручной синхронизации ${cabinet.name}: ${error.message}`);
     }

@@ -1,3 +1,4 @@
+const axios = require('axios');
 const prisma = require('../config/database');
 const logger = require('../utils/logger');
 
@@ -216,7 +217,7 @@ exports.sendMessage = async (req, res, next) => {
         const { getSyncService } = require('../services/marketplaceSync');
         const svc = getSyncService(chat.cabinet.marketplace.slug);
         if (svc) {
-          marketplaceSent = await svc.sendMessage(chat.cabinet, chat.externalChatId, text);
+          marketplaceSent = await svc.sendMessage(chat.cabinet, chat.externalChatId, text, { chat });
           if (!marketplaceSent) {
             logger.warn(`Не удалось отправить на ${chat.cabinet.marketplace.slug}: чат ${chatId}`);
           }
@@ -331,6 +332,113 @@ exports.updateStatus = async (req, res, next) => {
     });
 
     res.json({ success: true, data: chat });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /chats/:chatId/messages/:messageId/media — проксирование вложения
+exports.getMessageMedia = async (req, res, next) => {
+  try {
+    const conversationType = getConversationTypeFromRequest(req);
+    const { chatId, messageId } = req.params;
+    const accessResult = await ensureChatAccess(chatId, req.user, conversationType);
+    if (accessResult.error) {
+      return res.status(accessResult.error.status).json(accessResult.error.body);
+    }
+
+    const message = await prisma.chatMessage.findFirst({
+      where: {
+        id: messageId,
+        chatId,
+      },
+      include: {
+        chat: {
+          include: {
+            cabinet: {
+              include: {
+                marketplace: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!message) {
+      return res.status(404).json({ success: false, error: 'Сообщение не найдено' });
+    }
+
+    const mediaUrl = message.mediaUrl || null;
+    if (!mediaUrl) {
+      return res.status(404).json({ success: false, error: 'У сообщения нет вложения' });
+    }
+
+    const marketplaceSlug = message.chat?.cabinet?.marketplace?.slug;
+    if (marketplaceSlug !== 'ozon' && marketplaceSlug !== 'wb') {
+      return res.redirect(mediaUrl);
+    }
+
+    const cabinet = message.chat?.cabinet;
+    let headers = { Accept: '*/*' };
+    if (marketplaceSlug === 'ozon') {
+      if (!cabinet?.apiClientId || !cabinet?.apiKey) {
+        return res.status(400).json({ success: false, error: 'Для кабинета не настроены API-ключи' });
+      }
+      headers = {
+        ...headers,
+        'Client-Id': cabinet.apiClientId,
+        'Api-Key': cabinet.apiKey,
+      };
+    } else if (marketplaceSlug === 'wb') {
+      if (!cabinet?.apiToken) {
+        return res.status(400).json({ success: false, error: 'Для кабинета WB не настроен API-токен' });
+      }
+      headers = {
+        ...headers,
+        Authorization: cabinet.apiToken,
+      };
+    }
+
+    const upstream = await axios.get(mediaUrl, {
+      responseType: 'stream',
+      timeout: 20000,
+      headers,
+      validateStatus: () => true,
+    });
+
+    if (upstream.status >= 400) {
+      let details = '';
+      try {
+        if (upstream.data && typeof upstream.data.read === 'function') {
+          const chunks = [];
+          for await (const chunk of upstream.data) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            if (Buffer.concat(chunks).length > 2048) break;
+          }
+          details = Buffer.concat(chunks).toString('utf8');
+        }
+      } catch (_error) {
+        details = '';
+      }
+
+      logger.warn(`Не удалось загрузить ${marketplaceSlug} media ${mediaUrl}: ${upstream.status} ${details}`);
+      return res.status(upstream.status).json({
+        success: false,
+        error: `Не удалось загрузить вложение из ${marketplaceSlug === 'wb' ? 'Wildberries' : 'Ozon'}`,
+      });
+    }
+
+    const contentType = upstream.headers['content-type'] || message.mediaMimeType || 'application/octet-stream';
+    const contentLength = upstream.headers['content-length'];
+    const contentDisposition = upstream.headers['content-disposition'];
+
+    res.setHeader('Content-Type', contentType);
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    if (contentDisposition) res.setHeader('Content-Disposition', contentDisposition);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+
+    upstream.data.pipe(res);
   } catch (error) {
     next(error);
   }
