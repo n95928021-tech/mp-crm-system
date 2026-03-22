@@ -34,6 +34,7 @@ router.put('/cabinets/:cabinetId', authenticate, authorize('ADMIN'), marketplace
 router.get('/chats', authenticate, chatController.useChats, chatController.getChats);
 router.get('/chats/:chatId', authenticate, chatController.useChats, chatController.getChatById);
 router.get('/chats/:chatId/messages/:messageId/media', authenticate, chatController.useChats, chatController.getMessageMedia);
+router.post('/chats/:chatId/load-history', authenticate, chatController.useChats, chatController.loadFullHistory);
 router.post('/chats/:chatId/messages', authenticate, chatController.useChats, chatController.sendMessage);
 router.patch('/chats/:chatId/read', authenticate, chatController.useChats, chatController.markAsRead);
 router.patch('/chats/:chatId/assign', authenticate, chatController.useChats, chatController.assignManager);

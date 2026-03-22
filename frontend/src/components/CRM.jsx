@@ -222,9 +222,9 @@ const extractOrderInfoFromMessages = (messages = [], marketplaceId = "") => {
 
   const reversed = [...texts].reverse();
   const orderPatterns = [
-    /отправление\s*№\s*([A-ZА-ЯЁOО]?\d{8,9}-\d{4}-\d)/i,
-    /заказ\s*№\s*([A-ZА-ЯЁOО]?\d{8,9}-\d{4}-\d)/i,
-    /\b([A-ZА-ЯЁOО]?\d{8,9}-\d{4}-\d)\b/i,
+    /отправление\s*№\s*([A-ZА-ЯЁOО]?\d{8,10}-\d{4}-\d)/i,
+    /заказ\s*№\s*([A-ZА-ЯЁOО]?\d{8,10}-\d{4}-\d)/i,
+    /\b([A-ZА-ЯЁOО]?\d{8,10}-\d{4}-\d)\b/i,
   ];
 
   let orderId = "";
@@ -262,6 +262,8 @@ const extractOrderInfoFromMessages = (messages = [], marketplaceId = "") => {
 
   if (!orderScheme && marketplaceId === "ozon") {
     orderScheme = "Ozon";
+  } else if (!orderScheme && marketplaceId === "wb") {
+    orderScheme = "Wildberries";
   }
 
   return {
@@ -689,6 +691,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [selectedMarketplace, setSelectedMarketplace] = useState(null);
   const [selectedCabinet, setSelectedCabinet] = useState(null);
   const [selectedChat, setSelectedChat] = useState(null);
+  const [historyLoadingChatId, setHistoryLoadingChatId] = useState(null);
   const [selectedQuestion, setSelectedQuestion] = useState(null);
   const [messageInput, setMessageInput] = useState("");
   const [showTaskModal, setShowTaskModal] = useState(false);
@@ -776,7 +779,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       if (selectedCabinet) params.set("cabinetId", selectedCabinet);
       else if (selectedMarketplace) params.set("marketplaceId", selectedMarketplace);
       params.set("limit", "100");
-      if (selectedStatus) params.set("status", selectedStatus);
+      if (selectedStatus && ["OPEN", "PENDING", "RESOLVED"].includes(selectedStatus)) {
+        params.set("status", selectedStatus);
+      }
       const res = await fetch(`${apiUrl}/chats?${params}`, { headers: getHeaders() });
       if (res.ok) {
         const data = await res.json();
@@ -811,7 +816,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       if (selectedCabinet) params.set("cabinetId", selectedCabinet);
       else if (selectedMarketplace) params.set("marketplaceId", selectedMarketplace);
       params.set("limit", "100");
-      if (selectedStatus) params.set("status", selectedStatus);
+      if (selectedStatus && ["OPEN", "PENDING", "RESOLVED"].includes(selectedStatus)) {
+        params.set("status", selectedStatus);
+      }
       const res = await fetch(`${apiUrl}/questions?${params}`, { headers: getHeaders() });
       if (res.ok) {
         const data = await res.json();
@@ -860,11 +867,17 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         setter((prev) => prev.map((c) => {
           if (c.id !== chatId) return c;
           const lastMsg = msgs[msgs.length - 1];
+          const backendOrderDate = data.data?.orderDate ? formatOrderDate(data.data.orderDate) : "";
           return {
             ...c,
             messages: msgs,
             lastMessage: lastMsg ? getMessagePreview(lastMsg) : c.lastMessage,
             lastMessageTime: lastMsg ? lastMsg.time : c.lastMessageTime,
+            orderId: data.data?.orderId || c.orderId || "",
+            orderDate: backendOrderDate || c.orderDate || "",
+            orderCity: data.data?.orderCity || c.orderCity || "",
+            orderScheme: data.data?.orderScheme || c.orderScheme || "",
+            orderTitle: data.data?.orderTitle || c.orderTitle || "",
           };
         }));
       }
@@ -872,6 +885,25 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       console.error("Ошибка загрузки сообщений:", e);
     }
   }, [apiUrl]);
+
+  const loadFullConversationHistory = useCallback(async (chatId) => {
+    if (!apiUrl) return;
+    setHistoryLoadingChatId(chatId);
+    try {
+      const res = await fetch(`${apiUrl}/chats/${chatId}/load-history`, {
+        method: "POST",
+        headers: getHeaders(),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      await loadConversationMessages(chatId, "chats");
+    } catch (e) {
+      console.error("Ошибка полной догрузки истории:", e);
+    } finally {
+      setHistoryLoadingChatId(null);
+    }
+  }, [apiUrl, loadConversationMessages]);
 
   // ─── Загрузка задач из API ───
   const loadTasks = useCallback(async () => {
@@ -1076,7 +1108,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     let result = chats;
     if (selectedCabinet) result = result.filter((c) => c.cabinetId === selectedCabinet);
     else if (selectedMarketplace) result = result.filter((c) => c.marketplaceId === selectedMarketplace);
-    if (selectedStatus) result = result.filter((c) => c.status === selectedStatus);
+    if (selectedStatus === "NEW") result = result.filter((c) => (c.unread || 0) > 0);
+    else if (selectedStatus === "READ") result = result.filter((c) => (c.unread || 0) === 0);
+    else if (selectedStatus) result = result.filter((c) => c.status === selectedStatus);
     if (chatSearch.trim()) {
       const q = chatSearch.toLowerCase();
       result = result.filter((c) =>
@@ -1091,7 +1125,9 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     let result = questions;
     if (selectedCabinet) result = result.filter((c) => c.cabinetId === selectedCabinet);
     else if (selectedMarketplace) result = result.filter((c) => c.marketplaceId === selectedMarketplace);
-    if (selectedStatus) result = result.filter((c) => c.status === selectedStatus);
+    if (selectedStatus === "NEW") result = result.filter((c) => (c.unread || 0) > 0);
+    else if (selectedStatus === "READ") result = result.filter((c) => (c.unread || 0) === 0);
+    else if (selectedStatus) result = result.filter((c) => c.status === selectedStatus);
     if (chatSearch.trim()) {
       const q = chatSearch.toLowerCase();
       result = result.filter((c) =>
@@ -2698,8 +2734,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                 </button>
               </div>
               {/* Фильтр статусов */}
-              <div style={{ display: "flex", gap: 4, width: "100%" }}>
+              <div style={{ display: "flex", gap: 4, width: "100%", flexWrap: "wrap" }}>
                 {[
+                  { v: "NEW",      l: "Новые",       c: "#ec4899" },
+                  { v: "READ",     l: "Прочитанные", c: "#3b82f6" },
                   { v: "OPEN",     l: "Открытые",  c: "#22c55e" },
                   { v: "PENDING",  l: "Ожидание",  c: "#eab308" },
                   { v: "RESOLVED", l: "Решённые",  c: "#3b82f6" },
@@ -2709,7 +2747,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     key={v || "all"}
                     onClick={() => setSelectedStatus(v)}
                     style={{
-                      flex: 1, padding: "5px 4px", borderRadius: 6, border: "none",
+                      flex: "1 1 calc(33.333% - 4px)", padding: "5px 4px", borderRadius: 6, border: "none",
                       background: selectedStatus === v ? `${c}20` : "rgba(255,255,255,0.03)",
                       color: selectedStatus === v ? c : "#475569",
                       fontSize: 10, fontWeight: selectedStatus === v ? 700 : 400,
@@ -3024,6 +3062,23 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   {currentConversation.messages?.length === 0 && currentConversation.lastMessage && (
                     <div style={{ position: "relative", zIndex: 1, marginTop: 8, fontSize: 11, color: "#64748b" }}>
                       Полная история пока не загрузилась, поэтому показываем последнее сообщение из списка чатов.
+                    </div>
+                  )}
+                  {!isQuestionsView && currentConversation.marketplaceId === "wb" && (
+                    <div style={{ position: "relative", zIndex: 1, marginTop: 12, display: "flex", justifyContent: "center" }}>
+                      <button
+                        onClick={() => loadFullConversationHistory(currentConversation.id)}
+                        disabled={historyLoadingChatId === currentConversation.id}
+                        style={{
+                          ...S.btn(historyLoadingChatId === currentConversation.id ? "#475569" : "#2563eb"),
+                          padding: "8px 14px",
+                          fontSize: 12,
+                          opacity: historyLoadingChatId === currentConversation.id ? 0.8 : 1,
+                          cursor: historyLoadingChatId === currentConversation.id ? "default" : "pointer",
+                        }}
+                      >
+                        {historyLoadingChatId === currentConversation.id ? "Загружаем всю историю..." : "Загрузить всю историю сообщений"}
+                      </button>
                     </div>
                   )}
                   <div ref={chatEndRef} />

@@ -14,15 +14,41 @@ const logger = require('../utils/logger');
 
 // ─── Базовый класс ───
 class MarketplaceSyncService {
+  static manualHistoryLocks = new Set();
+
   constructor(name) {
     this.name = name;
   }
 
   parseMessageDate(value) {
     if (!value) return new Date();
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return new Date(value);
+    }
+    if (typeof value === 'string' && /^\d{10,17}$/.test(value.trim())) {
+      const numeric = Number(value.trim());
+      if (Number.isFinite(numeric)) return new Date(numeric);
+    }
     const parsed = new Date(value);
     if (!Number.isNaN(parsed.getTime())) return parsed;
     return new Date();
+  }
+
+  async sleep(ms) {
+    if (!ms || ms <= 0) return;
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  isManualHistoryLocked(cabinetId) {
+    return MarketplaceSyncService.manualHistoryLocks.has(cabinetId);
+  }
+
+  lockManualHistory(cabinetId) {
+    MarketplaceSyncService.manualHistoryLocks.add(cabinetId);
+  }
+
+  unlockManualHistory(cabinetId) {
+    MarketplaceSyncService.manualHistoryLocks.delete(cabinetId);
   }
 
   async syncChats(cabinet, io) {
@@ -203,6 +229,11 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
   async syncChats(cabinet, io) {
     try {
+      if (this.isManualHistoryLocked(cabinet.id)) {
+        logger.info(`WB ${cabinet.name}: пропускаем фоновую синхронизацию чатов, идёт ручная догрузка истории`);
+        return;
+      }
+
       if (!cabinet.apiToken) {
         logger.warn(`WB кабинет ${cabinet.name}: API токен не настроен`);
         return;
@@ -213,25 +244,30 @@ class WildberriesSyncService extends MarketplaceSyncService {
         timeout: 10000,
       });
 
-      const chats = response.data?.data?.chats || response.data?.chats || response.data?.data || response.data || [];
+      const chats =
+        response.data?.data?.chats ||
+        response.data?.chats ||
+        (Array.isArray(response.data?.result) ? response.data.result : null) ||
+        response.data?.data ||
+        response.data ||
+        [];
       const normalizedChats = Array.isArray(chats) ? chats : [];
       logger.info(`WB ${cabinet.name}: chat list returned ${normalizedChats.length} items`);
       if (normalizedChats[0]) {
         logger.debug(`WB ${cabinet.name}: sample chat payload ${JSON.stringify(normalizedChats[0]).slice(0, 2500)}`);
       }
 
-      const events = await this.fetchWbEvents(cabinet, normalizedChats[0] ? cabinet.name : null);
-      if (events[0]) {
-        logger.debug(`WB ${cabinet.name}: sample event payload ${JSON.stringify(events[0]).slice(0, 2500)}`);
+      if (!normalizedChats.length) {
+        await prisma.cabinet.update({
+          where: { id: cabinet.id },
+          data: { lastSyncAt: new Date() },
+        });
+
+        logger.info(`WB ${cabinet.name}: синхронизировано 0 чатов`);
+        return;
       }
 
-      const eventsByChatId = new Map();
-      for (const event of events) {
-        const chatId = this.getWbEventChatId(event);
-        if (!chatId) continue;
-        if (!eventsByChatId.has(chatId)) eventsByChatId.set(chatId, []);
-        eventsByChatId.get(chatId).push(event);
-      }
+      const savedChats = new Map();
 
       for (const chatData of normalizedChats) {
         const chatId = this.getWbChatId(chatData);
@@ -240,9 +276,10 @@ class WildberriesSyncService extends MarketplaceSyncService {
         const externalChatId = `wb-chat-${chatId}`;
         const customerName = this.getWbChatCustomerName(chatData);
         const replySign = this.getWbChatReplySign(chatData);
-        const unreadCount = this.getWbChatUnreadCount(chatData);
+        const unreadCountInfo = this.getWbChatUnreadCount(chatData);
         const lastMessageText = this.getWbChatLastMessageText(chatData);
-        const lastMessageAt = this.getWbChatLastMessageAt(chatData);
+        const lastMessageAtRaw = this.getWbChatLastMessageAt(chatData);
+        const lastMessageAt = lastMessageAtRaw ? this.parseMessageDate(lastMessageAtRaw) : null;
 
         const existingChat = await prisma.chat.findFirst({
           where: {
@@ -262,25 +299,65 @@ class WildberriesSyncService extends MarketplaceSyncService {
               customerName,
               customerExternalId: replySign || null,
               status: 'OPEN',
-              unreadCount,
-              lastMessageText,
-              lastMessageAt,
+              unreadCount: unreadCountInfo.value,
+              ...(lastMessageText ? { lastMessageText } : {}),
+              ...(lastMessageAt ? { lastMessageAt } : {}),
             },
           });
         } else {
+          const nextUnreadCount = unreadCountInfo.present ? unreadCountInfo.value : existingChat.unreadCount;
           chatRecord = await prisma.chat.update({
             where: { id: existingChat.id },
             data: {
               customerName,
               customerExternalId: replySign || existingChat.customerExternalId,
-              unreadCount,
+              unreadCount: nextUnreadCount,
               lastMessageText: lastMessageText || existingChat.lastMessageText,
               lastMessageAt: lastMessageAt || existingChat.lastMessageAt,
               status: 'OPEN',
             },
           });
         }
+        savedChats.set(chatId, {
+          chatRecord,
+          externalChatId,
+          customerName,
+          unreadCountInfo,
+          listLastMessageAt: lastMessageAt,
+          listLastMessageText: lastMessageText,
+        });
+      }
 
+      const prioritizedChatIds = normalizedChats
+        .slice()
+        .sort((a, b) => {
+          const bRaw = this.getWbChatLastMessageAt(b);
+          const aRaw = this.getWbChatLastMessageAt(a);
+          const bTime = bRaw ? this.parseMessageDate(bRaw).getTime() : 0;
+          const aTime = aRaw ? this.parseMessageDate(aRaw).getTime() : 0;
+          return bTime - aTime;
+        })
+        .slice(0, 30)
+        .map((chat) => this.getWbChatId(chat))
+        .filter(Boolean);
+
+      const events = await this.fetchWbEvents(cabinet, {
+        debugLabel: normalizedChats[0] ? cabinet.name : null,
+        targetChatIds: prioritizedChatIds,
+      });
+      if (events[0]) {
+        logger.debug(`WB ${cabinet.name}: sample event payload ${JSON.stringify(events[0]).slice(0, 2500)}`);
+      }
+
+      const eventsByChatId = new Map();
+      for (const event of events) {
+        const chatId = this.getWbEventChatId(event);
+        if (!chatId || !savedChats.has(chatId)) continue;
+        if (!eventsByChatId.has(chatId)) eventsByChatId.set(chatId, []);
+        eventsByChatId.get(chatId).push(event);
+      }
+
+      for (const [chatId, meta] of savedChats.entries()) {
         const chatEvents = (eventsByChatId.get(chatId) || []).sort((a, b) => {
           return this.parseMessageDate(this.getWbEventCreatedAt(a)) - this.parseMessageDate(this.getWbEventCreatedAt(b));
         });
@@ -289,10 +366,11 @@ class WildberriesSyncService extends MarketplaceSyncService {
           const media = this.getWbEventMedia(event);
           const text = this.getWbEventText(event) || (media?.messageType === 'IMAGE' ? '📷 Фотография' : media?.messageType === 'FILE' ? '📎 Файл' : '');
           if (!text && !media?.mediaUrl) continue;
+          const eventCreatedAt = this.parseMessageDate(this.getWbEventCreatedAt(event));
 
           await this.processIncomingMessage(cabinet, {
-            externalChatId,
-            customerName: this.getWbEventCustomerName(event) || customerName,
+            externalChatId: meta.externalChatId,
+            customerName: this.getWbEventCustomerName(event) || meta.customerName,
             text,
             messageType: media?.messageType || 'TEXT',
             mediaUrl: media?.mediaUrl || null,
@@ -301,18 +379,41 @@ class WildberriesSyncService extends MarketplaceSyncService {
             externalMsgId: `wb-chat-event-${this.getWbEventId(event) || `${chatId}-${this.getWbEventCreatedAt(event)}`}`,
             conversationType: 'CHAT',
             senderType: this.getWbEventSenderType(event),
-            createdAt: this.getWbEventCreatedAt(event),
+            createdAt: eventCreatedAt,
           }, io);
         }
 
         const lastEvent = chatEvents[chatEvents.length - 1];
-        if (lastEvent && chatRecord) {
+        const derivedUnreadCount = this.deriveWbUnreadCount(chatEvents);
+        if (lastEvent && meta.chatRecord) {
+          const lastEventAt = this.parseMessageDate(this.getWbEventCreatedAt(lastEvent));
+          const updateData = {
+            lastMessageText: this.getWbEventText(lastEvent) || meta.listLastMessageText || meta.chatRecord.lastMessageText,
+            lastMessageAt: lastEventAt,
+          };
+
+          if (meta.unreadCountInfo.present) {
+            updateData.unreadCount = meta.unreadCountInfo.value;
+          } else if (derivedUnreadCount > 0) {
+            updateData.unreadCount = derivedUnreadCount;
+          } else {
+            const confidentManagerReply = (
+              chatEvents.length > 0 &&
+              this.getWbEventSenderType(lastEvent) === 'MANAGER' &&
+              (
+                !meta.listLastMessageAt ||
+                Math.abs(lastEventAt.getTime() - meta.listLastMessageAt.getTime()) <= 5 * 60 * 1000 ||
+                lastEventAt >= meta.listLastMessageAt
+              )
+            );
+            if (confidentManagerReply) {
+              updateData.unreadCount = 0;
+            }
+          }
+
           await prisma.chat.update({
-            where: { id: chatRecord.id },
-            data: {
-              lastMessageText: this.getWbEventText(lastEvent) || chatRecord.lastMessageText,
-              lastMessageAt: this.parseMessageDate(this.getWbEventCreatedAt(lastEvent)),
-            },
+            where: { id: meta.chatRecord.id },
+            data: updateData,
           });
         }
       }
@@ -322,10 +423,107 @@ class WildberriesSyncService extends MarketplaceSyncService {
         data: { lastSyncAt: new Date() },
       });
 
-      logger.info(`WB ${cabinet.name}: синхронизировано ${normalizedChats.length} чатов`);
+      logger.info(`WB ${cabinet.name}: синхронизировано ${normalizedChats.length} чатов, полная история автозагружена для ${prioritizedChatIds.length} последних`);
     } catch (error) {
       logger.error(`WB ${cabinet.name} ошибка синхронизации чатов: ${error.message} | response: ${JSON.stringify(error.response?.data)}`);
     }
+  }
+
+  async loadFullChatHistory(cabinet, chat) {
+    if (!cabinet?.apiToken || !chat?.externalChatId?.startsWith('wb-chat-')) {
+      return { loaded: 0 };
+    }
+
+    const targetChatId = chat.externalChatId.replace('wb-chat-', '');
+    this.lockManualHistory(cabinet.id);
+    logger.info(`WB ${cabinet.name}: запускаем ручную догрузку полной истории для чата ${targetChatId}`);
+
+    try {
+      const events = await this.fetchWbEvents(cabinet, {
+        debugLabel: `${cabinet.name}:${targetChatId}:manual`,
+        targetChatIds: [targetChatId],
+        maxPages: 200,
+        pageDelayMs: 450,
+        stopAfterInitialQuietPages: 6,
+        stopAfterTargetQuietPages: 3,
+      });
+
+      const filteredEvents = events
+        .filter((event) => this.getWbEventChatId(event) === targetChatId)
+        .sort((a, b) => this.parseMessageDate(this.getWbEventCreatedAt(a)) - this.parseMessageDate(this.getWbEventCreatedAt(b)));
+
+      let loaded = 0;
+      for (const event of filteredEvents) {
+        const media = this.getWbEventMedia(event);
+        const text = this.getWbEventText(event) || (media?.messageType === 'IMAGE' ? '📷 Фотография' : media?.messageType === 'FILE' ? '📎 Файл' : '');
+        if (!text && !media?.mediaUrl) continue;
+        const eventCreatedAt = this.parseMessageDate(this.getWbEventCreatedAt(event));
+
+        await this.processIncomingMessage(cabinet, {
+          externalChatId: chat.externalChatId,
+          customerName: this.getWbEventCustomerName(event) || chat.customerName,
+          text,
+          messageType: media?.messageType || 'TEXT',
+          mediaUrl: media?.mediaUrl || null,
+          thumbnailUrl: media?.thumbnailUrl || null,
+          mediaMimeType: media?.mediaMimeType || null,
+          externalMsgId: `wb-chat-event-${this.getWbEventId(event) || `${targetChatId}-${this.getWbEventCreatedAt(event)}`}`,
+          conversationType: 'CHAT',
+          senderType: this.getWbEventSenderType(event),
+          createdAt: eventCreatedAt,
+        });
+        loaded += 1;
+      }
+
+      const lastEvent = filteredEvents[filteredEvents.length - 1];
+      if (lastEvent) {
+        await prisma.chat.update({
+          where: { id: chat.id },
+          data: {
+            customerName: this.getWbEventCustomerName(lastEvent) || chat.customerName,
+            lastMessageText: this.getWbEventText(lastEvent) || chat.lastMessageText,
+            lastMessageAt: this.parseMessageDate(this.getWbEventCreatedAt(lastEvent)),
+          },
+        });
+      }
+
+      logger.info(`WB ${cabinet.name}: вручную догружено ${loaded} сообщений для чата ${targetChatId}`);
+      return { loaded };
+    } finally {
+      this.unlockManualHistory(cabinet.id);
+    }
+  }
+
+  async getChatMetadata(cabinet, externalChatId) {
+    if (!cabinet?.apiToken || !externalChatId?.startsWith('wb-chat-')) {
+      return null;
+    }
+
+    const targetChatId = externalChatId.replace('wb-chat-', '');
+    const response = await axios.get(`${this.chatBaseUrl}${this.chatListPath}`, {
+      headers: { Authorization: cabinet.apiToken },
+      timeout: 10000,
+    });
+
+    const chats =
+      response.data?.data?.chats ||
+      response.data?.chats ||
+      (Array.isArray(response.data?.result) ? response.data.result : null) ||
+      response.data?.data ||
+      response.data ||
+      [];
+
+    const matchedChat = (Array.isArray(chats) ? chats : []).find((item) => this.getWbChatId(item) === targetChatId);
+    if (!matchedChat) return null;
+
+    const goodCard = matchedChat.goodCard || matchedChat.good_card || {};
+    return {
+      orderId: goodCard.rid || matchedChat.rid || '',
+      orderDate: goodCard.date || matchedChat.orderDate || null,
+      orderScheme: 'Wildberries',
+      orderCity: '',
+      orderTitle: goodCard.name || matchedChat.goodName || '',
+    };
   }
 
   async syncQuestions(cabinet, io) {
@@ -458,13 +656,26 @@ class WildberriesSyncService extends MarketplaceSyncService {
   }
 
   getWbChatUnreadCount(chatData) {
-    return Number(
-      chatData?.unreadCount ||
-      chatData?.unansweredCount ||
-      chatData?.newMessagesCount ||
-      chatData?.countUnread ||
-      0
-    ) || 0;
+    const candidates = [
+      chatData?.unreadCount,
+      chatData?.unread_count,
+      chatData?.unreadMessagesCount,
+      chatData?.unread_messages_count,
+      chatData?.newMessagesCount,
+      chatData?.new_messages_count,
+      chatData?.countUnread,
+      chatData?.count_unread,
+      chatData?.unansweredCount,
+      chatData?.unanswered_count,
+      chatData?.lastMessage?.unreadCount,
+      chatData?.lastMessage?.unread_count,
+    ];
+
+    const presentValue = candidates.find((value) => value !== undefined && value !== null && value !== '');
+    return {
+      present: presentValue !== undefined,
+      value: Number(presentValue || 0) || 0,
+    };
   }
 
   getWbChatLastMessageText(chatData) {
@@ -474,19 +685,36 @@ class WildberriesSyncService extends MarketplaceSyncService {
       lastMessage?.text ||
       lastMessage?.message ||
       chatData?.text ||
-      ''
-    );
+      null
+    ) || null;
   }
 
   getWbChatLastMessageAt(chatData) {
+    const lastMessage = chatData?.lastMessage || chatData?.last_message || chatData?.message || null;
     return (
+      lastMessage?.addTimestamp ||
+      lastMessage?.add_timestamp ||
+      lastMessage?.timestamp ||
+      lastMessage?.createdAt ||
+      lastMessage?.created_at ||
       chatData?.lastMessageDate ||
       chatData?.last_message_date ||
       chatData?.lastMessageAt ||
       chatData?.updatedAt ||
       chatData?.createdAt ||
-      new Date()
+      null
     );
+  }
+
+  deriveWbUnreadCount(chatEvents) {
+    if (!Array.isArray(chatEvents) || chatEvents.length === 0) return 0;
+    let unread = 0;
+    for (let i = chatEvents.length - 1; i >= 0; i -= 1) {
+      const senderType = this.getWbEventSenderType(chatEvents[i]);
+      if (senderType === 'MANAGER') break;
+      unread += 1;
+    }
+    return unread;
   }
 
   getWbEventId(event) {
@@ -500,6 +728,10 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
   getWbEventCreatedAt(event) {
     return (
+      event?.addTimestamp ||
+      event?.add_timestamp ||
+      event?.addTime ||
+      event?.add_time ||
       event?.createdAt ||
       event?.createdDate ||
       event?.dateTime ||
@@ -523,10 +755,12 @@ class WildberriesSyncService extends MarketplaceSyncService {
   getWbEventText(event) {
     const value = (
       event?.text ||
+      event?.message?.text ||
       event?.message ||
       event?.body ||
       event?.content?.text ||
       event?.payload?.text ||
+      event?.payload?.message?.text ||
       ''
     );
     return typeof value === 'string' ? value.trim() : '';
@@ -598,34 +832,78 @@ class WildberriesSyncService extends MarketplaceSyncService {
     };
   }
 
-  async fetchWbEvents(cabinet, debugLabel = null) {
+  async fetchWbEvents(cabinet, options = {}) {
     const headers = { Authorization: cabinet.apiToken };
     const collected = [];
     const seen = new Set();
     let next = null;
     let page = 0;
-    const maxPages = 20;
+    const {
+      debugLabel = null,
+      targetChatIds = null,
+      maxPages = 100,
+      pageDelayMs = 1100,
+      stopAfterInitialQuietPages = 0,
+      stopAfterTargetQuietPages = 0,
+    } = options;
+    const targetSet = Array.isArray(targetChatIds) && targetChatIds.length ? new Set(targetChatIds.map(String)) : null;
+    let hasMatchedTarget = false;
+    let targetQuietPages = 0;
 
     while (page < maxPages) {
-      const response = await axios.get(`${this.chatBaseUrl}${this.chatEventsPath}`, {
-        headers,
-        params: next ? { next } : {},
-        timeout: 10000,
-      });
+      let response;
+      let attempt = 0;
+      while (attempt < 5) {
+        try {
+          response = await axios.get(`${this.chatBaseUrl}${this.chatEventsPath}`, {
+            headers,
+            params: next ? { next } : {},
+            timeout: 15000,
+          });
+          break;
+        } catch (error) {
+          if (error.response?.status === 429) {
+            attempt += 1;
+            const retryDelay = Math.min(5000, pageDelayMs * attempt);
+            logger.warn(`WB ${cabinet.name}: лимит events (429), повтор ${attempt}/5 через ${retryDelay}мс`);
+            await this.sleep(retryDelay);
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      if (!response) {
+        logger.warn(`WB ${cabinet.name}: достигнут лимит events, используем частично загруженную историю (${collected.length} событий)`);
+        break;
+      }
 
       const payload = response.data?.data || response.data?.result || response.data || {};
       const events = payload?.events || payload?.items || payload?.messages || [];
       const normalizedEvents = Array.isArray(events) ? events : [];
       const nextCursor = payload?.next || payload?.nextCursor || payload?.cursor?.next || null;
+      const totalEvents = payload?.totalEvents;
+      const scopedEvents = targetSet
+        ? normalizedEvents.filter((event) => targetSet.has(this.getWbEventChatId(event)))
+        : normalizedEvents;
+
+      if (targetSet) {
+        if (scopedEvents.length > 0) {
+          hasMatchedTarget = true;
+          targetQuietPages = 0;
+        } else if (hasMatchedTarget) {
+          targetQuietPages += 1;
+        }
+      }
 
       if (debugLabel) {
-        logger.debug(`WB events ${debugLabel}: page ${page + 1}, next=${next || 'null'}, batch=${normalizedEvents.length}`);
+        logger.debug(`WB events ${debugLabel}: page ${page + 1}, next=${next || 'null'}, batch=${normalizedEvents.length}, matched=${scopedEvents.length}, totalEvents=${totalEvents ?? 'n/a'}`);
       }
 
       if (!normalizedEvents.length) break;
 
       let added = 0;
-      for (const event of normalizedEvents) {
+      for (const event of scopedEvents) {
         const eventId = this.getWbEventId(event) || `${this.getWbEventChatId(event)}-${this.getWbEventCreatedAt(event)}`;
         if (seen.has(eventId)) continue;
         seen.add(eventId);
@@ -633,9 +911,22 @@ class WildberriesSyncService extends MarketplaceSyncService {
         added += 1;
       }
 
-      if (!nextCursor || added === 0) break;
+      if (targetSet) {
+        if (totalEvents === 0 || !nextCursor) break;
+        if (!hasMatchedTarget && stopAfterInitialQuietPages > 0 && page + 1 >= stopAfterInitialQuietPages) {
+          logger.info(`WB ${cabinet.name}: останавливаем поиск истории после ${page + 1} страниц без единого события целевого чата`);
+          break;
+        }
+        if (hasMatchedTarget && stopAfterTargetQuietPages > 0 && targetQuietPages >= stopAfterTargetQuietPages) {
+          logger.info(`WB ${cabinet.name}: останавливаем поиск истории после ${targetQuietPages} пустых страниц подряд для целевого чата`);
+          break;
+        }
+      } else {
+        if (totalEvents === 0 || !nextCursor || added === 0) break;
+      }
       next = nextCursor;
       page += 1;
+      await this.sleep(pageDelayMs);
     }
 
     return collected;

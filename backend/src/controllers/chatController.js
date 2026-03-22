@@ -79,7 +79,18 @@ exports.getChats = async (req, res, next) => {
     if (cabinetId) {
       where.cabinetId = cabinetId;
     } else if (marketplaceId) {
-      where.cabinet = { marketplaceId };
+      where.cabinet = {
+        is: {
+          marketplace: {
+            is: {
+              OR: [
+                { id: marketplaceId },
+                { slug: marketplaceId },
+              ],
+            },
+          },
+        },
+      };
     }
 
     // Фильтр по статусу
@@ -191,7 +202,58 @@ exports.getChatById = async (req, res, next) => {
       }];
     }
 
+    if (chat?.cabinet?.marketplace?.slug === 'wb') {
+      try {
+        const { getSyncService } = require('../services/marketplaceSync');
+        const service = getSyncService('wb');
+        if (service?.getChatMetadata) {
+          const metadata = await service.getChatMetadata(chat.cabinet, chat.externalChatId);
+          if (metadata) {
+            chat.orderId = metadata.orderId || '';
+            chat.orderDate = metadata.orderDate || null;
+            chat.orderScheme = metadata.orderScheme || '';
+            chat.orderCity = metadata.orderCity || '';
+            chat.orderTitle = metadata.orderTitle || '';
+          }
+        }
+      } catch (metadataError) {
+        logger.warn(`Не удалось получить WB metadata для чата ${chat.id}: ${metadataError.message}`);
+      }
+    }
+
     res.json({ success: true, data: chat });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// POST /chats/:chatId/load-history — вручную догрузить полную историю
+exports.loadFullHistory = async (req, res, next) => {
+  try {
+    const conversationType = getConversationTypeFromRequest(req);
+    const accessResult = await ensureChatAccess(req.params.chatId, req.user, conversationType);
+    if (accessResult.error) {
+      return res.status(accessResult.error.status).json(accessResult.error.body);
+    }
+
+    const { chat } = accessResult;
+    const fullChat = await prisma.chat.findUnique({
+      where: { id: chat.id },
+      include: {
+        cabinet: { include: { marketplace: true } },
+      },
+    });
+
+    const { getSyncService } = require('../services/marketplaceSync');
+    const service = getSyncService(fullChat.cabinet.marketplace.slug);
+
+    if (!service?.loadFullChatHistory) {
+      return res.status(400).json({ success: false, error: 'Полная догрузка истории для этого маркетплейса не поддерживается' });
+    }
+
+    logger.info(`Запрос ручной догрузки истории: ${fullChat.cabinet.name} / ${fullChat.externalChatId}`);
+    const result = await service.loadFullChatHistory(fullChat.cabinet, fullChat);
+    return res.json({ success: true, data: result || { loaded: 0 } });
   } catch (error) {
     next(error);
   }
