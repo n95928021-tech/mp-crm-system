@@ -463,7 +463,7 @@ const TimerBar = ({ lastMessageTime }) => {
 };
 
 // ─── Карточка чата с градиентной полоской-таймером справа ───
-const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badge }) => {
+const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, onContextMenu, getCabinet, badge }) => {
   const mp = mpProp || { color: "#6366f1", name: "—" }; // fallback если маркетплейс ещё не загружен
   const [elapsed, setElapsed] = useState(0);
   const hasUnread = (chat.unread || 0) > 0;
@@ -497,6 +497,7 @@ const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, getCabinet, badg
   return (
     <div
       onClick={onClick}
+      onContextMenu={onContextMenu}
       style={{
         display: "flex", alignItems: "stretch",
         cursor: "pointer",
@@ -725,6 +726,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifLoading, setNotifLoading] = useState(false);
   const [manualSyncRunning, setManualSyncRunning] = useState(false);
+  const [chatContextMenu, setChatContextMenu] = useState(null);
   // ─── Поиск ───
   const [chatSearch, setChatSearch] = useState("");
   // ─── Настройки ───
@@ -757,6 +759,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
             name: c.name,
             chatCount: c._count?.chats || 0,
             lastSyncAt: c.lastSyncAt,
+            hasSharedCredentials: !!c.hasSharedCredentials,
             // API ключи — приходят только если пользователь ADMIN
             apiToken: c.apiToken || "",
             apiClientId: c.apiClientId || "",
@@ -795,6 +798,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           unread: c.unreadCount || 0,
           responseTimeSec: c.elapsedSeconds || 0,
           status: c.status,
+          productTitle: c.productTitle || "",
+          sellerArticle: c.sellerArticle || "",
+          productImage: c.productImage || "",
+          productUrl: c.productUrl || "",
           messages: [],
         }));
         setChats((prev) => mapped.map((chat) => {
@@ -832,6 +839,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
           unread: c.unreadCount || 0,
           responseTimeSec: c.elapsedSeconds || 0,
           status: c.status,
+          productTitle: c.productTitle || "",
+          sellerArticle: c.sellerArticle || "",
+          productImage: c.productImage || "",
+          productUrl: c.productUrl || "",
           messages: [],
         }));
         setQuestions((prev) => mapped.map((question) => {
@@ -878,6 +889,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
             orderCity: data.data?.orderCity || c.orderCity || "",
             orderScheme: data.data?.orderScheme || c.orderScheme || "",
             orderTitle: data.data?.orderTitle || c.orderTitle || "",
+            productTitle: data.data?.productTitle || c.productTitle || "",
+            sellerArticle: data.data?.sellerArticle || c.sellerArticle || "",
+            productImage: data.data?.productImage || c.productImage || "",
+            productUrl: data.data?.productUrl || c.productUrl || "",
           };
         }));
       }
@@ -886,18 +901,18 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     }
   }, [apiUrl]);
 
-  const loadFullConversationHistory = useCallback(async (chatId) => {
+  const loadFullConversationHistory = useCallback(async (chatId, kind = "chats") => {
     if (!apiUrl) return;
     setHistoryLoadingChatId(chatId);
     try {
-      const res = await fetch(`${apiUrl}/chats/${chatId}/load-history`, {
+      const res = await fetch(`${apiUrl}/${kind}/${chatId}/load-history`, {
         method: "POST",
         headers: getHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
-      await loadConversationMessages(chatId, "chats");
+      await loadConversationMessages(chatId, kind);
     } catch (e) {
       console.error("Ошибка полной догрузки истории:", e);
     } finally {
@@ -1015,6 +1030,20 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!chatContextMenu) return undefined;
+    const closeMenu = () => setChatContextMenu(null);
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") setChatContextMenu(null);
+    };
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [chatContextMenu]);
 
   // ─── Загрузка маркетплейсов один раз при старте ───
   useEffect(() => {
@@ -1169,6 +1198,33 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     }
   };
 
+  const markConversationAsUnread = useCallback(async (conversationId, kind = "chats") => {
+    if (!apiUrl || !conversationId) return;
+    try {
+      const res = await fetch(`${apiUrl}/${kind}/${conversationId}/unread`, {
+        method: "PATCH",
+        headers: getHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      const unreadCount = payload?.data?.unreadCount || 1;
+
+      if (kind === "questions") {
+        setQuestions((prev) => prev.map((item) => (
+          item.id === conversationId ? { ...item, unread: unreadCount } : item
+        )));
+      } else {
+        setChats((prev) => prev.map((item) => (
+          item.id === conversationId ? { ...item, unread: unreadCount } : item
+        )));
+      }
+    } catch (e) {
+      console.error("Ошибка пометки непрочитанным:", e);
+    } finally {
+      setChatContextMenu(null);
+    }
+  }, [apiUrl, getHeaders]);
+
   const addTask = async () => {
     if (!newTask.title || !newTask.date) return;
     if (!apiUrl) return;
@@ -1297,6 +1353,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
     if (!currentConversation || isQuestionsView) return null;
     return extractOrderInfoFromMessages(visibleMessages, currentConversation.marketplaceId);
   }, [currentConversation, isQuestionsView, visibleMessages]);
+  const productTitle = currentConversation?.productTitle || currentConversation?.orderTitle || "";
+  const sellerArticle = currentConversation?.sellerArticle || "";
+  const productImage = currentConversation?.productImage || "";
+  const productUrl = currentConversation?.productUrl || "";
   const visibleConversations = isQuestionsView ? filteredQuestions : filteredChats;
   const conversationsLoading = isQuestionsView ? questionsLoading : chatsLoading;
   const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
@@ -2141,7 +2201,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
             {marketplaces.map((mp) => {
               const isExpanded = expandedMp[mp.id] !== false;
               const activeCabs = mp.cabinets.slice(0, 6);
-              const configuredCount = activeCabs.filter(c => c.apiToken || c.apiKey).length;
+              const configuredCount = activeCabs.filter((c) => c.hasSharedCredentials || c.apiToken || c.apiKey || c.apiClientId || c.campaignId).length;
               return (
                 <div key={mp.id} style={{
                   background: "rgba(255,255,255,0.02)", borderRadius: 14,
@@ -2173,6 +2233,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                       {activeCabs.map((cab) => {
                         const cabExpanded = expandedMp["cab_" + cab.id] !== false;
                         const isEditing = editingCabinet === cab.id;
+                        const hasConfiguredApi = cab.hasSharedCredentials || cab.apiToken || cab.apiKey || cab.apiClientId || cab.campaignId;
                         const startEdit = (field, val) => {
                           if (!isEditing) {
                             setEditingCabinet(cab.id);
@@ -2188,14 +2249,14 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                             {/* Строка кабинета — кликабельна */}
                             <div onClick={() => setExpandedMp(p => ({ ...p, ["cab_" + cab.id]: !cabExpanded }))}
                               style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 20px 11px 28px", cursor: "pointer", userSelect: "none", background: cabExpanded ? "rgba(255,255,255,0.02)" : "transparent" }}>
-                              <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: (cab.apiToken || cab.apiKey) ? "#22c55e" : "#475569" }} />
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: hasConfiguredApi ? "#22c55e" : "#475569" }} />
                               <span style={{ fontSize: 13, fontWeight: 500, color: cabExpanded ? "#e2e8f0" : "#94a3b8", flex: 1 }}>{cab.name}</span>
                               {cab.chatCount > 0 && <span style={{ fontSize: 10, color: "#64748b" }}>{cab.chatCount} чатов</span>}
                               {cab.lastSyncAt && <span style={{ fontSize: 10, color: "#334155" }}>↻ {new Date(cab.lastSyncAt).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>}
                               <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, fontWeight: 700,
-                                background: (cab.apiToken || cab.apiKey) ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.08)",
-                                color: (cab.apiToken || cab.apiKey) ? "#22c55e" : "#ef4444" }}>
-                                {(cab.apiToken || cab.apiKey) ? "✓ API" : "нет API"}
+                                background: hasConfiguredApi ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.08)",
+                                color: hasConfiguredApi ? "#22c55e" : "#ef4444" }}>
+                                {hasConfiguredApi ? "✓ API" : "нет API"}
                               </span>
                               <span style={{ color: "#334155", fontSize: 14, transform: cabExpanded ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>▾</span>
                             </div>
@@ -2679,6 +2740,41 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         <div style={{ position: "fixed", inset: 0, zIndex: 499 }} onClick={() => setShowNotifications(false)} />
       )}
 
+      {chatContextMenu && (
+        <div
+          style={{
+            position: "fixed",
+            top: chatContextMenu.y,
+            left: chatContextMenu.x,
+            zIndex: 1200,
+            background: "#111827",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 8,
+            boxShadow: "0 14px 28px rgba(0,0,0,0.45)",
+            minWidth: 220,
+            overflow: "hidden",
+          }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            onClick={() => markConversationAsUnread(chatContextMenu.conversationId, chatContextMenu.kind)}
+            style={{
+              width: "100%",
+              textAlign: "left",
+              background: "transparent",
+              color: "#e5e7eb",
+              border: "none",
+              padding: "10px 12px",
+              cursor: "pointer",
+              fontSize: 12,
+              fontFamily: "inherit",
+            }}
+          >
+            Пометить непрочитанным
+          </button>
+        </div>
+      )}
+
       {/* Main Content */}
       {(activeView === "chats" || activeView === "questions") && (
         <>
@@ -2700,13 +2796,27 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     if (!apiUrl || manualSyncRunning) return;
                     try {
                       setManualSyncRunning(true);
-                      await fetch(`${apiUrl}/sync/manual`, { method: "POST", headers: getHeaders() });
-                      setTimeout(() => {
-                        loadChats();
-                        loadQuestions();
-                        setManualSyncRunning(false);
-                      }, 3000);
+                      const selectedCabinetData = currentConversation
+                        ? getCabinet(currentConversation.cabinetId)
+                        : null;
+                      const selectedMarketplaceId =
+                        selectedCabinetData?.marketplaceId || currentConversation?.marketplaceId;
+                      const isWbConversation = Boolean(currentConversation && selectedMarketplaceId === "wb");
+
+                      if (isWbConversation) {
+                        const kind = isQuestionsView ? "questions" : "chats";
+                        await loadFullConversationHistory(currentConversation.id, kind);
+                        await loadConversationMessages(currentConversation.id, kind);
+                        if (isQuestionsView) await loadQuestions();
+                        else await loadChats();
+                      } else {
+                        await fetch(`${apiUrl}/sync/manual`, { method: "POST", headers: getHeaders() });
+                        await loadChats();
+                        await loadQuestions();
+                      }
                     } catch (e) {
+                      console.error("РћС€РёР±РєР° СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё:", e);
+                    } finally {
                       setManualSyncRunning(false);
                     }
                   }}
@@ -2817,6 +2927,15 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                         fetch(`${apiUrl}/${isQuestionsView ? "questions" : "chats"}/${chat.id}/read`, { method: "PATCH", headers: getHeaders() }).catch(() => {});
                       }
                     }}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setChatContextMenu({
+                        x: event.clientX,
+                        y: event.clientY,
+                        conversationId: chat.id,
+                        kind: isQuestionsView ? "questions" : "chats",
+                      });
+                    }}
                     getCabinet={getCabinet}
                     badge={S.badge}
                   />
@@ -2856,9 +2975,64 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                       {getCabinet(currentConversation.cabinetId)?.name} ·{" "}
                       {getMarketplace(currentConversation.marketplaceId)?.name}
                     </div>
+                    {(productTitle || sellerArticle) && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5 }}>
+                        <div
+                          style={{
+                            width: 34,
+                            height: 34,
+                            borderRadius: 8,
+                            border: "1px solid rgba(255,255,255,0.15)",
+                            background: "rgba(255,255,255,0.04)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            overflow: "hidden",
+                            flexShrink: 0,
+                            color: "#94a3b8",
+                            fontSize: 9,
+                            fontWeight: 600,
+                          }}
+                        >
+                          {productImage ? (
+                            <img
+                              src={productImage}
+                              alt={productTitle || "Товар"}
+                              style={{
+                                width: "100%",
+                                height: "100%",
+                                objectFit: "cover",
+                              }}
+                            />
+                          ) : "Фото"}
+                        </div>
+                        <div style={{ fontSize: 11, color: "#94a3b8", lineHeight: 1.35 }}>
+                          <span>{productTitle || "Карточка: —"}</span>
+                          {sellerArticle ? <span>{` · Артикул продавца: ${sellerArticle}`}</span> : null}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
                     {/* Статус чата */}
+                    <button
+                      onClick={() => {
+                        if (!productUrl) return;
+                        window.open(productUrl, "_blank", "noopener,noreferrer");
+                      }}
+                      disabled={!productUrl}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 5,
+                        padding: "6px 12px", borderRadius: 8,
+                        background: productUrl ? "rgba(34,197,94,0.12)" : "rgba(148,163,184,0.08)",
+                        border: productUrl ? "1px solid rgba(34,197,94,0.25)" : "1px solid rgba(148,163,184,0.18)",
+                        color: productUrl ? "#22c55e" : "#64748b", fontSize: 11, fontWeight: 600,
+                        cursor: productUrl ? "pointer" : "not-allowed", fontFamily: "inherit",
+                      }}
+                      title={productUrl || "Ссылка на товар недоступна"}
+                    >
+                      {Icons.eye()} Перейти на товар
+                    </button>
                     <select
                       value={currentConversation.status || "OPEN"}
                       onChange={async (e) => {

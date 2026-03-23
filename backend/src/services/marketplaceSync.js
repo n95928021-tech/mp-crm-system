@@ -94,6 +94,72 @@ class MarketplaceSyncService {
       .trim();
   }
 
+  extractProductImageUrl(payload, depth = 0) {
+    if (!payload || depth > 6) return '';
+    if (typeof payload === 'string') {
+      const normalized = payload.trim();
+      if (!/^https?:\/\//i.test(normalized)) return '';
+      if (/\.(jpg|jpeg|png|gif|webp|bmp|heic)(\?|$)/i.test(normalized)) return normalized;
+      // Маркетплейсы часто отдают image_url без расширения файла — такой URL тоже считаем валидной миниатюрой.
+      return normalized;
+    }
+    if (Array.isArray(payload)) {
+      for (const item of payload) {
+        const found = this.extractProductImageUrl(item, depth + 1);
+        if (found) return found;
+      }
+      return '';
+    }
+    if (typeof payload !== 'object') return '';
+
+    const directCandidates = [
+      payload.image,
+      payload.imageUrl,
+      payload.image_url,
+      payload.photo,
+      payload.photoUrl,
+      payload.photo_url,
+      payload.thumbnail,
+      payload.thumbnailUrl,
+      payload.thumbnail_url,
+      payload.preview,
+      payload.previewUrl,
+      payload.preview_url,
+      payload.picture,
+      payload.pictureUrl,
+      payload.picture_url,
+      payload.primaryImage,
+      payload.primary_image,
+      payload.mainImage,
+      payload.main_image,
+      payload.images,
+      payload.photos,
+      payload.pictures,
+      payload.gallery,
+    ];
+
+    for (const candidate of directCandidates) {
+      const found = this.extractProductImageUrl(candidate, depth + 1);
+      if (found) return found;
+    }
+
+    for (const [key, value] of Object.entries(payload)) {
+      const normalizedKey = key.toLowerCase();
+      if (
+        normalizedKey.includes('image') ||
+        normalizedKey.includes('photo') ||
+        normalizedKey.includes('picture') ||
+        normalizedKey.includes('thumb') ||
+        normalizedKey.includes('preview')
+      ) {
+        const found = this.extractProductImageUrl(value, depth + 1);
+        if (found) return found;
+      }
+    }
+
+    return '';
+  }
+
   async sendMessage(cabinet, externalChatId, text) {
     throw new Error('sendMessage() не реализован');
   }
@@ -225,6 +291,64 @@ class WildberriesSyncService extends MarketplaceSyncService {
     this.chatEventsPath = config.marketplaces.wb.chatEventsPath;
     this.chatMessagePath = config.marketplaces.wb.chatMessagePath;
     this.chatDownloadPath = config.marketplaces.wb.chatDownloadPath;
+    this.wbImageUrlCache = new Map();
+  }
+
+  getWbNmIdFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') return '';
+    const raw = (
+      payload.productDetails?.nmId ||
+      payload.goodCard?.nmId ||
+      payload.product?.nmId ||
+      payload.nmId ||
+      payload.nm_id ||
+      ''
+    ).toString().trim();
+    return /^\d+$/.test(raw) ? raw : '';
+  }
+
+  buildWbProductUrlFromNmId(nmId) {
+    if (!nmId || !/^\d+$/.test(String(nmId))) return '';
+    return `https://www.wildberries.ru/catalog/${nmId}/detail.aspx`;
+  }
+
+  buildWbImageCandidates(nmId) {
+    const numericNm = Number(nmId);
+    if (!Number.isFinite(numericNm) || numericNm <= 0) return [];
+    const vol = Math.floor(numericNm / 100000);
+    const part = Math.floor(numericNm / 1000);
+    const basketHosts = Array.from({ length: 20 }, (_, idx) => `basket-${String(idx + 1).padStart(2, '0')}.wbbasket.ru`);
+
+    const candidates = [];
+    for (const host of basketHosts) {
+      candidates.push(`https://${host}/vol${vol}/part${part}/${numericNm}/images/c246x328/1.webp`);
+      candidates.push(`https://${host}/vol${vol}/part${part}/${numericNm}/images/c246x328/1.jpg`);
+    }
+    return candidates;
+  }
+
+  async resolveWbImageByNmId(nmId) {
+    if (!nmId) return '';
+    if (this.wbImageUrlCache.has(nmId)) return this.wbImageUrlCache.get(nmId);
+
+    const candidates = this.buildWbImageCandidates(nmId);
+    if (!candidates.length) {
+      this.wbImageUrlCache.set(nmId, '');
+      return '';
+    }
+
+    const checks = candidates.map(async (url) => {
+      try {
+        const response = await axios.head(url, { timeout: 1600, validateStatus: () => true });
+        return response.status === 200 ? url : '';
+      } catch (_) {
+        return '';
+      }
+    });
+
+    const resolved = (await Promise.all(checks)).find(Boolean) || '';
+    this.wbImageUrlCache.set(nmId, resolved);
+    return resolved;
   }
 
   async syncChats(cabinet, io) {
@@ -494,6 +618,91 @@ class WildberriesSyncService extends MarketplaceSyncService {
     }
   }
 
+  async loadFullQuestionHistory(cabinet, chat, io) {
+    if (!cabinet?.apiToken || !chat?.externalChatId?.startsWith('wb-q-')) {
+      return { loaded: 0 };
+    }
+
+    const questionId = chat.externalChatId.replace('wb-q-', '');
+    logger.info(`WB ${cabinet.name}: targeted question sync for ${questionId}`);
+
+    const question = await this.fetchWbQuestionById(cabinet, questionId);
+    if (!question) {
+      logger.warn(`WB ${cabinet.name}: question ${questionId} not found in API`);
+      return { loaded: 0 };
+    }
+
+    let loaded = 0;
+    const customerName = question.userName || 'Покупатель WB';
+
+    if (question.text) {
+      const message = await this.processIncomingMessage(cabinet, {
+        externalChatId: `wb-q-${question.id}`,
+        customerName,
+        text: question.text,
+        externalMsgId: `wb-msg-${question.id}`,
+        conversationType: 'QUESTION',
+        createdAt: question.createdDate || question.createdAt,
+      }, io);
+      if (message) loaded += 1;
+    }
+
+    const answerText = question.answer?.text || question.answerText || question.answer;
+    if (answerText) {
+      const answerMessage = await this.processIncomingMessage(cabinet, {
+        externalChatId: `wb-q-${question.id}`,
+        customerName,
+        text: answerText,
+        externalMsgId: `wb-answer-${question.id}`,
+        conversationType: 'QUESTION',
+        senderType: 'MANAGER',
+        createdAt: question.answer?.createdDate || question.answer?.createdAt || question.updatedDate || question.updatedAt,
+      }, io);
+      if (answerMessage) loaded += 1;
+    }
+
+    await prisma.cabinet.update({
+      where: { id: cabinet.id },
+      data: { lastSyncAt: new Date() },
+    });
+
+    return { loaded };
+  }
+
+  async fetchWbQuestionById(cabinet, questionId) {
+    const headers = { Authorization: cabinet.apiToken };
+    const normalizedId = String(questionId);
+    const searchVariants = [
+      { isAnswered: false },
+      { isAnswered: true },
+      {},
+    ];
+
+    for (const variant of searchVariants) {
+      for (let page = 0; page < 10; page += 1) {
+        const params = {
+          take: 100,
+          skip: page * 100,
+          ...variant,
+        };
+
+        const response = await axios.get(`${this.baseUrl}/api/v1/questions`, {
+          headers,
+          params,
+          timeout: 10000,
+        });
+
+        const questions = response.data?.data?.questions || [];
+        const normalizedQuestions = Array.isArray(questions) ? questions : [];
+        const match = normalizedQuestions.find((q) => String(q?.id || '') === normalizedId);
+        if (match) return match;
+        if (normalizedQuestions.length < 100) break;
+      }
+    }
+
+    return null;
+  }
+
   async getChatMetadata(cabinet, externalChatId) {
     if (!cabinet?.apiToken || !externalChatId?.startsWith('wb-chat-')) {
       return null;
@@ -517,12 +726,85 @@ class WildberriesSyncService extends MarketplaceSyncService {
     if (!matchedChat) return null;
 
     const goodCard = matchedChat.goodCard || matchedChat.good_card || {};
+    const nmId = this.getWbNmIdFromPayload({ ...matchedChat, goodCard });
+    const resolvedImage = await this.resolveWbImageByNmId(nmId);
+    const productUrl = this.buildWbProductUrlFromNmId(nmId);
     return {
       orderId: goodCard.rid || matchedChat.rid || '',
       orderDate: goodCard.date || matchedChat.orderDate || null,
       orderScheme: 'Wildberries',
       orderCity: '',
       orderTitle: goodCard.name || matchedChat.goodName || '',
+      productTitle: goodCard.name || matchedChat.goodName || '',
+      sellerArticle: (
+        goodCard.supplierArticle ||
+        goodCard.vendorCode ||
+        matchedChat.supplierArticle ||
+        matchedChat.vendorCode ||
+        ''
+      ).toString().trim(),
+      productImage: this.extractProductImageUrl(goodCard) || this.extractProductImageUrl(matchedChat) || resolvedImage || '',
+      productUrl,
+    };
+  }
+
+  extractWbQuestionProductMetadata(question) {
+    if (!question || typeof question !== 'object') {
+      return { productTitle: '', sellerArticle: '', productImage: '', productUrl: '' };
+    }
+
+    const productTitle = (
+      question.productDetails?.productName ||
+      question.productDetails?.name ||
+      question.product?.name ||
+      question.productCard?.name ||
+      question.goodCard?.name ||
+      question.good_name ||
+      question.productName ||
+      question.itemName ||
+      question.nmName ||
+      question.subjectName ||
+      ''
+    ).toString().trim();
+
+    const sellerArticle = (
+      question.productDetails?.supplierArticle ||
+      question.productDetails?.vendorCode ||
+      question.product?.supplierArticle ||
+      question.product?.vendorCode ||
+      question.goodCard?.supplierArticle ||
+      question.goodCard?.vendorCode ||
+      question.supplierArticle ||
+      question.vendorCode ||
+      question.vendor_code ||
+      question.sku ||
+      ''
+    ).toString().trim();
+
+    const productImage = this.extractProductImageUrl(question.productDetails) || this.extractProductImageUrl(question);
+    const productUrl = this.buildWbProductUrlFromNmId(this.getWbNmIdFromPayload(question));
+
+    return { productTitle, sellerArticle, productImage, productUrl };
+  }
+
+  async getQuestionMetadata(cabinet, externalChatId) {
+    if (!cabinet?.apiToken || !externalChatId?.startsWith('wb-q-')) {
+      return null;
+    }
+
+    const questionId = externalChatId.replace('wb-q-', '');
+    const question = await this.fetchWbQuestionById(cabinet, questionId);
+    if (!question) return null;
+
+    const { productTitle, sellerArticle, productImage, productUrl } = this.extractWbQuestionProductMetadata(question);
+    const nmId = this.getWbNmIdFromPayload(question);
+    const resolvedImage = await this.resolveWbImageByNmId(nmId);
+    return {
+      productTitle,
+      sellerArticle,
+      productImage: productImage || resolvedImage || '',
+      productUrl: productUrl || this.buildWbProductUrlFromNmId(nmId),
+      orderTitle: productTitle || '',
     };
   }
 
@@ -940,10 +1222,12 @@ class OzonSyncService extends MarketplaceSyncService {
     this.baseUrl = config.marketplaces.ozon.baseUrl;
     this.chatListPath = config.marketplaces.ozon.chatListPath;
     this.chatHistoryPath = config.marketplaces.ozon.chatHistoryPath;
+    this.productInfoListPath = config.marketplaces.ozon.productInfoListPath;
     this.questionListPath = config.marketplaces.ozon.questionListPath;
     this.questionInfoPath = config.marketplaces.ozon.questionInfoPath;
     this.questionAnswerListPath = config.marketplaces.ozon.questionAnswerListPath;
     this.questionAnswerCreatePath = config.marketplaces.ozon.questionAnswerCreatePath;
+    this.productInfoCache = new Map();
   }
 
   getOzonChatId(chatData, chatMeta) {
@@ -1026,7 +1310,75 @@ class OzonSyncService extends MarketplaceSyncService {
       ''
     ).toString().toUpperCase();
 
-    return chatType === 'BUYER_SELLER';
+    if (chatType === 'BUYER_SELLER') {
+      return true;
+    }
+
+    if (chatType && ['NOTIFICATION', 'SYSTEM', 'BOT', 'SUPPORT'].some((token) => chatType.includes(token))) {
+      return false;
+    }
+
+    const roles = [];
+    const collectRoles = (value) => {
+      if (!value) return;
+      if (Array.isArray(value)) {
+        value.forEach(collectRoles);
+        return;
+      }
+      if (typeof value !== 'object') {
+        roles.push(String(value).toLowerCase());
+        return;
+      }
+
+      const directValues = [
+        value.type,
+        value.user_type,
+        value.role,
+        value.name,
+        value.title,
+        value.chat_type,
+        value.participant_type,
+      ];
+
+      directValues.filter(Boolean).forEach((item) => roles.push(String(item).toLowerCase()));
+      Object.values(value).forEach(collectRoles);
+    };
+
+    collectRoles(chatData.participants);
+    collectRoles(chatMeta.participants);
+    collectRoles(chatData.users);
+    collectRoles(chatMeta.users);
+    collectRoles(chatData.members);
+    collectRoles(chatMeta.members);
+    collectRoles(chatData.buyer);
+    collectRoles(chatMeta.buyer);
+    collectRoles(chatData.seller);
+    collectRoles(chatMeta.seller);
+
+    const hasBuyerRole = roles.some((role) => role.includes('buyer') || role.includes('customer') || role.includes('client'));
+    const hasSellerRole = roles.some((role) => role.includes('seller') || role.includes('manager') || role.includes('operator') || role.includes('admin'));
+
+    if (hasBuyerRole && hasSellerRole) {
+      return true;
+    }
+
+    const hasBuyerMetadata = Boolean(
+      chatData.buyer_name ||
+      chatData.buyerName ||
+      chatData.customer_name ||
+      chatData.customerName ||
+      chatMeta.buyer_name ||
+      chatMeta.buyerName ||
+      chatMeta.customer_name ||
+      chatMeta.customerName ||
+      chatMeta.buyer?.name
+    );
+
+    if (hasBuyerMetadata && (!chatType || chatType === 'UNSPECIFIED' || chatType === 'UNKNOWN')) {
+      return true;
+    }
+
+    return false;
   }
 
   isOzonSystemMessage(msg) {
@@ -1360,6 +1712,311 @@ class OzonSyncService extends MarketplaceSyncService {
     }
 
     return { info, answers };
+  }
+
+  extractOzonProductMetadata(payload) {
+    const source = payload || {};
+
+    const findByKeyHints = (node, hints, options = {}, depth = 0) => {
+      if (!node || depth > 6) return '';
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          const found = findByKeyHints(item, hints, options, depth + 1);
+          if (found) return found;
+        }
+        return '';
+      }
+      if (typeof node !== 'object') return '';
+
+      for (const [key, value] of Object.entries(node)) {
+        const normalizedKey = key.toLowerCase();
+        if (hints.some((hint) => normalizedKey.includes(hint))) {
+          if (options.excludeHints?.some((hint) => normalizedKey.includes(hint))) {
+            continue;
+          }
+          if (typeof value === 'string' && value.trim()) return value.trim();
+          if (typeof value === 'number') return String(value);
+        }
+      }
+
+      for (const value of Object.values(node)) {
+        const found = findByKeyHints(value, hints, options, depth + 1);
+        if (found) return found;
+      }
+      return '';
+    };
+
+    const productUrl = (
+      source.product_url ||
+      source.productUrl ||
+      source.offer?.url ||
+      source.product?.url ||
+      ''
+    ).toString().trim();
+
+    const productTitle = (
+      source.product_name ||
+      source.productName ||
+      source.offer_name ||
+      source.offerName ||
+      source.item_name ||
+      source.itemName ||
+      source.sku_name ||
+      source.skuName ||
+      source.nm_name ||
+      source.nmName ||
+      source.product?.name ||
+      source.product?.title ||
+      source.offer?.name ||
+      source.offer?.title ||
+      source.item?.name ||
+      source.item?.title ||
+      findByKeyHints(source, ['product_name', 'offer_name', 'item_name', 'sku_name', 'nm_name']) ||
+      (() => {
+        const match = productUrl.match(/\/product\/([^/?#]+)/i);
+        if (!match?.[1]) return '';
+        const slug = decodeURIComponent(match[1]).replace(/-\d+$/, '');
+        return slug.replace(/-/g, ' ').trim();
+      })() ||
+      ''
+    ).toString().trim();
+
+    const sellerArticle = (
+      source.seller_sku ||
+      source.sellerSku ||
+      source.vendor_code ||
+      source.vendorCode ||
+      source.shop_sku ||
+      source.shopSku ||
+      source.article ||
+      source.product?.seller_sku ||
+      source.product?.sellerSku ||
+      source.product?.vendor_code ||
+      source.product?.vendorCode ||
+      source.offer?.seller_sku ||
+      source.offer?.sellerSku ||
+      source.offer?.vendor_code ||
+      source.offer?.vendorCode ||
+      source.offer?.shop_sku ||
+      source.offer?.shopSku ||
+      source.item?.seller_sku ||
+      source.item?.sellerSku ||
+      source.item?.vendor_code ||
+      source.item?.vendorCode ||
+      findByKeyHints(source, ['seller_sku', 'vendor_code', 'shop_sku', 'article'], { excludeHints: ['sku_name'] }) ||
+      ''
+    ).toString().trim();
+
+    const offerId = (
+      source.offer_id ||
+      source.offerId ||
+      source.offer?.id ||
+      source.offer?.offer_id ||
+      source.item?.offer_id ||
+      source.item?.offerId ||
+      source.product?.offer_id ||
+      source.product?.offerId ||
+      ''
+    ).toString().trim();
+
+    const skuRaw = source.sku || source.sku_id || source.skuId || source.product?.sku || source.product?.sku_id || source.product?.skuId || '';
+    const sku = skuRaw === '' || skuRaw === null || skuRaw === undefined ? null : String(skuRaw).trim();
+
+    const productIdRaw = source.product_id || source.productId || source.item_id || source.itemId || source.product?.id || source.offer?.product_id || '';
+    const productId = productIdRaw === '' || productIdRaw === null || productIdRaw === undefined ? null : String(productIdRaw).trim();
+
+    const productImage = this.extractProductImageUrl(source) || '';
+
+    return {
+      productTitle,
+      sellerArticle,
+      productImage,
+      productUrl,
+      offerId,
+      sku,
+      productId,
+    };
+  }
+
+  getOzonMetadataCacheKey(cabinet, seed) {
+    const normalizedSeed = JSON.stringify({
+      offerId: seed.offerId || '',
+      sellerArticle: seed.sellerArticle || '',
+      sku: seed.sku || '',
+      productId: seed.productId || '',
+      productUrl: seed.productUrl || '',
+    });
+    return `${cabinet?.id || 'cabinet'}:${normalizedSeed}`;
+  }
+
+  normalizeOzonCatalogItem(item) {
+    if (!item || typeof item !== 'object') return null;
+    return {
+      productTitle: (
+        item.name ||
+        item.product_name ||
+        item.offer_name ||
+        item.title ||
+        ''
+      ).toString().trim(),
+      sellerArticle: (
+        item.offer_id ||
+        item.offerId ||
+        item.seller_sku ||
+        item.sellerSku ||
+        item.vendor_code ||
+        item.vendorCode ||
+        item.shop_sku ||
+        item.shopSku ||
+        ''
+      ).toString().trim(),
+      productImage: (
+        item.primary_image ||
+        item.primaryImage ||
+        item.image_url ||
+        item.imageUrl ||
+        this.extractProductImageUrl(item)
+      ).toString().trim(),
+      productUrl: (
+        item.product_url ||
+        item.productUrl ||
+        item.url ||
+        item.link ||
+        item.offer_url ||
+        item.offerUrl ||
+        ''
+      ).toString().trim(),
+    };
+  }
+
+  async fetchOzonProductInfoList(cabinet, requestBody) {
+    if (!this.productInfoListPath) return [];
+    const response = await axios.post(
+      `${this.baseUrl}${this.productInfoListPath}`,
+      requestBody,
+      {
+        headers: {
+          'Client-Id': cabinet.apiClientId,
+          'Api-Key': cabinet.apiKey,
+        },
+        timeout: 10000,
+      }
+    );
+
+    return (
+      response.data?.result?.items ||
+      response.data?.result?.products ||
+      response.data?.result ||
+      response.data?.items ||
+      response.data?.products ||
+      []
+    );
+  }
+
+  async enrichOzonProductMetadata(cabinet, seedMetadata) {
+    if (!cabinet?.apiClientId || !cabinet?.apiKey) return seedMetadata;
+    const cacheKey = this.getOzonMetadataCacheKey(cabinet, seedMetadata);
+    if (this.productInfoCache.has(cacheKey)) {
+      return { ...seedMetadata, ...this.productInfoCache.get(cacheKey) };
+    }
+
+    const requests = [];
+    if (seedMetadata.offerId) {
+      requests.push({ offer_id: [seedMetadata.offerId] });
+    }
+    if (seedMetadata.sellerArticle && seedMetadata.sellerArticle !== seedMetadata.offerId) {
+      requests.push({ offer_id: [seedMetadata.sellerArticle] });
+    }
+    if (seedMetadata.productId && /^\d+$/.test(seedMetadata.productId)) {
+      requests.push({ product_id: [Number(seedMetadata.productId)] });
+    }
+    if (seedMetadata.sku && /^\d+$/.test(seedMetadata.sku)) {
+      requests.push({ product_id: [Number(seedMetadata.sku)] });
+      requests.push({ sku: [Number(seedMetadata.sku)] });
+    }
+
+    for (const requestBody of requests) {
+      try {
+        const items = await this.fetchOzonProductInfoList(cabinet, requestBody);
+        const normalizedItems = Array.isArray(items) ? items : [];
+        const first = normalizedItems.map((item) => this.normalizeOzonCatalogItem(item)).find(Boolean);
+        if (first) {
+          const enriched = {
+            productTitle: first.productTitle || seedMetadata.productTitle || '',
+            sellerArticle: first.sellerArticle || seedMetadata.sellerArticle || '',
+            productImage: first.productImage || seedMetadata.productImage || '',
+            productUrl: first.productUrl || seedMetadata.productUrl || '',
+          };
+          this.productInfoCache.set(cacheKey, enriched);
+          return { ...seedMetadata, ...enriched };
+        }
+      } catch (error) {
+        logger.debug(`Ozon ${cabinet.name}: product info request failed (${JSON.stringify(requestBody)}): ${error.response?.status || ''} ${error.message}`);
+      }
+    }
+
+    const fallback = {
+      productTitle: seedMetadata.productTitle || '',
+      sellerArticle: seedMetadata.sellerArticle || '',
+      productImage: seedMetadata.productImage || '',
+      productUrl: seedMetadata.productUrl || '',
+    };
+    this.productInfoCache.set(cacheKey, fallback);
+    return { ...seedMetadata, ...fallback };
+  }
+
+  async getQuestionMetadata(cabinet, externalChatId) {
+    if (!cabinet?.apiClientId || !cabinet?.apiKey || !externalChatId?.startsWith('ozon-q-')) {
+      return null;
+    }
+
+    const questionId = externalChatId.replace('ozon-q-', '');
+    const { info } = await this.fetchOzonQuestionDetails(cabinet, questionId);
+    const meta = await this.enrichOzonProductMetadata(cabinet, this.extractOzonProductMetadata(info || {}));
+    return {
+      productTitle: meta.productTitle,
+      sellerArticle: meta.sellerArticle,
+      productImage: meta.productImage || '',
+      productUrl: meta.productUrl || '',
+      orderTitle: meta.productTitle || '',
+    };
+  }
+
+  async getChatMetadata(cabinet, externalChatId) {
+    if (!cabinet?.apiClientId || !cabinet?.apiKey || !externalChatId?.startsWith('ozon-')) {
+      return null;
+    }
+
+    const chatId = externalChatId.replace('ozon-', '');
+    const response = await axios.post(
+      `${this.baseUrl}${this.chatListPath}`,
+      { limit: 100 },
+      {
+        headers: {
+          'Client-Id': cabinet.apiClientId,
+          'Api-Key': cabinet.apiKey,
+        },
+        timeout: 10000,
+      }
+    );
+
+    const chats = response.data?.result?.chats || response.data?.chats || [];
+    const matched = (Array.isArray(chats) ? chats : []).find((item) => String(this.getOzonChatId(item, item.chat || item) || '') === String(chatId));
+    if (!matched) return null;
+
+    const meta = await this.enrichOzonProductMetadata(cabinet, this.extractOzonProductMetadata({
+      ...matched,
+      ...(matched.chat || {}),
+      last_message: matched.last_message || matched.chat?.last_message || null,
+    }));
+
+    return {
+      productTitle: meta.productTitle,
+      sellerArticle: meta.sellerArticle,
+      productImage: meta.productImage || '',
+      productUrl: meta.productUrl || '',
+      orderTitle: meta.productTitle || '',
+    };
   }
 
   async syncQuestions(cabinet, io) {
@@ -1785,6 +2442,90 @@ class YandexMarketSyncService extends MarketplaceSyncService {
     }
   }
 
+  extractYandexProductMetadata(payload) {
+    const source = payload || {};
+
+    const productTitle = (
+      source.offerName ||
+      source.offer_name ||
+      source.itemName ||
+      source.item_name ||
+      source.title ||
+      source.name ||
+      source.offer?.name ||
+      source.offer?.title ||
+      source.item?.name ||
+      source.item?.title ||
+      source.order?.items?.[0]?.offerName ||
+      source.order?.items?.[0]?.offer_name ||
+      ''
+    ).toString().trim();
+
+    const sellerArticle = (
+      source.offerId ||
+      source.offer_id ||
+      source.shopSku ||
+      source.shop_sku ||
+      source.vendorCode ||
+      source.vendor_code ||
+      source.sku ||
+      source.offer?.offerId ||
+      source.offer?.offer_id ||
+      source.offer?.shopSku ||
+      source.order?.items?.[0]?.offerId ||
+      source.order?.items?.[0]?.offer_id ||
+      ''
+    ).toString().trim();
+
+    const productImage = this.extractProductImageUrl(source.order?.items?.[0]) || this.extractProductImageUrl(source);
+    const productUrl = (
+      source.offerUrl ||
+      source.offer_url ||
+      source.productUrl ||
+      source.product_url ||
+      source.url ||
+      source.link ||
+      source.offer?.url ||
+      source.item?.url ||
+      source.order?.items?.[0]?.offerUrl ||
+      source.order?.items?.[0]?.offer_url ||
+      ''
+    ).toString().trim();
+
+    return { productTitle, sellerArticle, productImage, productUrl };
+  }
+
+  async getChatMetadata(cabinet, externalChatId) {
+    if (!cabinet?.apiToken || !cabinet?.campaignId || !externalChatId?.startsWith('ym-')) {
+      return null;
+    }
+
+    const chatId = externalChatId.replace('ym-', '');
+    const response = await axios.post(
+      `${this.baseUrl}/businesses/${cabinet.campaignId}/chats`,
+      { page: 1, pageSize: 100 },
+      {
+        headers: {
+          Authorization: `Bearer ${cabinet.apiToken}`,
+        },
+        timeout: 10000,
+      }
+    );
+
+    const chats = response.data?.result?.chats || [];
+    const matched = (Array.isArray(chats) ? chats : []).find((item) => String(item?.chatId || item?.id || '') === String(chatId));
+    if (!matched) return null;
+
+    const meta = this.extractYandexProductMetadata(matched);
+    return {
+      productTitle: meta.productTitle,
+      sellerArticle: meta.sellerArticle,
+      productImage: meta.productImage || '',
+      productUrl: meta.productUrl || '',
+      orderTitle: meta.productTitle || '',
+    };
+  }
+
   async sendMessage(cabinet, externalChatId, text) {
     try {
       const chatId = externalChatId.replace('ym-', '');
@@ -1819,6 +2560,21 @@ const getSyncService = (marketplaceSlug) => {
 
 let syncInFlightPromise = null;
 
+const getMarketplaceSyncPriority = (marketplaceSlug) => {
+  switch (marketplaceSlug) {
+    case 'ozon':
+      return 0;
+    case 'yandex':
+      return 1;
+    case 'wb':
+      return 2;
+    default:
+      return 10;
+  }
+};
+
+const isSyncInFlight = () => Boolean(syncInFlightPromise);
+
 const syncAllMarketplaces = async (io) => {
   if (syncInFlightPromise) {
     logger.warn('Синхронизация уже выполняется, повторный запуск пропущен');
@@ -1826,12 +2582,29 @@ const syncAllMarketplaces = async (io) => {
   }
 
   syncInFlightPromise = (async () => {
-  const cabinets = await prisma.cabinet.findMany({
-    where: { isActive: true },
-    include: { marketplace: true },
-  });
+    const cabinets = await prisma.cabinet.findMany({
+      where: { isActive: true },
+      include: { marketplace: true },
+    });
 
-  for (const cabinet of cabinets) {
+    const sortedCabinets = cabinets.sort((a, b) => {
+      const priorityDiff =
+        getMarketplaceSyncPriority(a.marketplace.slug) -
+        getMarketplaceSyncPriority(b.marketplace.slug);
+      if (priorityDiff !== 0) return priorityDiff;
+
+      const aSyncTime = a.lastSyncAt ? new Date(a.lastSyncAt).getTime() : 0;
+      const bSyncTime = b.lastSyncAt ? new Date(b.lastSyncAt).getTime() : 0;
+      return aSyncTime - bSyncTime;
+    });
+
+    logger.info(
+      `Starting marketplace sync for ${sortedCabinets.length} cabinets: ${sortedCabinets
+        .map((cabinet) => `${cabinet.marketplace.slug}:${cabinet.name}`)
+        .join(', ')}`
+    );
+
+    for (const cabinet of sortedCabinets) {
     const service = getSyncService(cabinet.marketplace.slug);
     if (!service) continue;
 
@@ -1866,6 +2639,7 @@ const syncAllMarketplaces = async (io) => {
 
 module.exports = {
   getSyncService,
+  isSyncInFlight,
   syncAllMarketplaces,
   WildberriesSyncService,
   OzonSyncService,

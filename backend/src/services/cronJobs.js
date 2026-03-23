@@ -4,7 +4,7 @@
 
 const cron = require('node-cron');
 const prisma = require('../config/database');
-const { getSyncService } = require('./marketplaceSync');
+const { syncAllMarketplaces } = require('./marketplaceSync');
 const logger = require('../utils/logger');
 
 const setupCronJobs = (io) => {
@@ -12,17 +12,7 @@ const setupCronJobs = (io) => {
   cron.schedule('*/2 * * * *', async () => {
     logger.info('⏰ Запуск синхронизации чатов...');
     try {
-      const cabinets = await prisma.cabinet.findMany({
-        where: { isActive: true },
-        include: { marketplace: true },
-      });
-
-      for (const cabinet of cabinets) {
-        const service = getSyncService(cabinet.marketplace.slug);
-        if (service) {
-          await service.syncChats(cabinet, io);
-        }
-      }
+      await syncAllMarketplaces(io);
 
       logger.info('✅ Синхронизация чатов завершена');
     } catch (error) {

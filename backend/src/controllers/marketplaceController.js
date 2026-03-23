@@ -1,5 +1,10 @@
 const prisma = require('../config/database');
 
+const hasCabinetCredentials = (cabinet) => {
+  if (!cabinet) return false;
+  return Boolean(cabinet.apiToken || cabinet.apiClientId || cabinet.apiKey || cabinet.campaignId);
+};
+
 // GET /marketplaces — все маркетплейсы с кабинетами
 exports.getMarketplaces = async (req, res, next) => {
   try {
@@ -19,13 +24,13 @@ exports.getMarketplaces = async (req, res, next) => {
             lastSyncAt: true,
             createdAt: true,
             updatedAt: true,
+            apiToken: true,
+            apiClientId: true,
+            apiKey: true,
+            campaignId: true,
             _count: { select: { chats: true } },
             // API ключи — только для ADMIN
             ...(isAdmin ? {
-              apiToken: true,
-              apiClientId: true,
-              apiKey: true,
-              campaignId: true,
             } : {}),
           },
         },
@@ -33,7 +38,19 @@ exports.getMarketplaces = async (req, res, next) => {
       orderBy: { name: 'asc' },
     });
 
-    res.json({ success: true, data: marketplaces });
+    const data = marketplaces.map((marketplace) => ({
+      ...marketplace,
+      cabinets: (marketplace.cabinets || []).map((cabinet) => ({
+        ...cabinet,
+        hasSharedCredentials: hasCabinetCredentials(cabinet),
+        apiToken: isAdmin ? cabinet.apiToken : undefined,
+        apiClientId: isAdmin ? cabinet.apiClientId : undefined,
+        apiKey: isAdmin ? cabinet.apiKey : undefined,
+        campaignId: isAdmin ? cabinet.campaignId : undefined,
+      })),
+    }));
+
+    res.json({ success: true, data });
   } catch (error) {
     next(error);
   }
@@ -48,10 +65,10 @@ exports.getCabinetById = async (req, res, next) => {
       select: {
         id: true, name: true, marketplaceId: true,
         isActive: true, lastSyncAt: true, createdAt: true, updatedAt: true,
+        apiToken: true, apiClientId: true, apiKey: true, campaignId: true,
         marketplace: true,
         _count: { select: { chats: true, tasks: true } },
         ...(isAdmin ? {
-          apiToken: true, apiClientId: true, apiKey: true, campaignId: true,
         } : {}),
       },
     });
@@ -60,7 +77,17 @@ exports.getCabinetById = async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Кабинет не найден' });
     }
 
-    res.json({ success: true, data: cabinet });
+    res.json({
+      success: true,
+      data: {
+        ...cabinet,
+        hasSharedCredentials: hasCabinetCredentials(cabinet),
+        apiToken: isAdmin ? cabinet.apiToken : undefined,
+        apiClientId: isAdmin ? cabinet.apiClientId : undefined,
+        apiKey: isAdmin ? cabinet.apiKey : undefined,
+        campaignId: isAdmin ? cabinet.campaignId : undefined,
+      },
+    });
   } catch (error) {
     next(error);
   }

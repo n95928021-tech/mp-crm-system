@@ -8,6 +8,11 @@ const bcrypt = require('bcryptjs');
 const prisma = new PrismaClient();
 
 async function main() {
+  const existingUsers = await prisma.user.count();
+  if (existingUsers > 0) {
+    console.log('Database already contains users, skipping seed');
+    return;
+  }
   console.log('🌱 Начинаем заполнение базы данных...\n');
 
   // ─── Маркетплейсы ───

@@ -45,6 +45,7 @@ module.exports = {
       baseUrl: process.env.OZON_API_BASE_URL || 'https://api-seller.ozon.ru',
       chatListPath: process.env.OZON_CHAT_LIST_PATH || '/v3/chat/list',
       chatHistoryPath: process.env.OZON_CHAT_HISTORY_PATH || '/v3/chat/history',
+      productInfoListPath: process.env.OZON_PRODUCT_INFO_LIST_PATH || '/v3/product/info/list',
       questionListPath: process.env.OZON_QUESTION_LIST_PATH || '/v1/question/list',
       questionInfoPath: process.env.OZON_QUESTION_INFO_PATH || '/v1/question/info',
       questionAnswerListPath: process.env.OZON_QUESTION_ANSWER_LIST_PATH || '/v1/question/answer/list',

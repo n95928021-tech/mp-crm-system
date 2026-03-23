@@ -202,22 +202,26 @@ exports.getChatById = async (req, res, next) => {
       }];
     }
 
-    if (chat?.cabinet?.marketplace?.slug === 'wb') {
+    if (chat?.cabinet?.marketplace?.slug) {
       try {
         const { getSyncService } = require('../services/marketplaceSync');
-        const service = getSyncService('wb');
-        if (service?.getChatMetadata) {
-          const metadata = await service.getChatMetadata(chat.cabinet, chat.externalChatId);
-          if (metadata) {
-            chat.orderId = metadata.orderId || '';
-            chat.orderDate = metadata.orderDate || null;
-            chat.orderScheme = metadata.orderScheme || '';
-            chat.orderCity = metadata.orderCity || '';
-            chat.orderTitle = metadata.orderTitle || '';
-          }
+        const service = getSyncService(chat.cabinet.marketplace.slug);
+        const metadata = chat.conversationType === 'QUESTION'
+          ? await service?.getQuestionMetadata?.(chat.cabinet, chat.externalChatId)
+          : await service?.getChatMetadata?.(chat.cabinet, chat.externalChatId);
+        if (metadata) {
+          chat.orderId = metadata.orderId || chat.orderId || '';
+          chat.orderDate = metadata.orderDate || chat.orderDate || null;
+          chat.orderScheme = metadata.orderScheme || chat.orderScheme || '';
+          chat.orderCity = metadata.orderCity || chat.orderCity || '';
+          chat.orderTitle = metadata.orderTitle || chat.orderTitle || '';
+          chat.productTitle = metadata.productTitle || chat.productTitle || '';
+          chat.sellerArticle = metadata.sellerArticle || chat.sellerArticle || '';
+          chat.productImage = metadata.productImage || chat.productImage || '';
+          chat.productUrl = metadata.productUrl || chat.productUrl || '';
         }
       } catch (metadataError) {
-        logger.warn(`Не удалось получить WB metadata для чата ${chat.id}: ${metadataError.message}`);
+        logger.warn(`Не удалось получить metadata для чата ${chat.id}: ${metadataError.message}`);
       }
     }
 
@@ -247,12 +251,16 @@ exports.loadFullHistory = async (req, res, next) => {
     const { getSyncService } = require('../services/marketplaceSync');
     const service = getSyncService(fullChat.cabinet.marketplace.slug);
 
-    if (!service?.loadFullChatHistory) {
+    const loadHistoryMethod = conversationType === 'QUESTION'
+      ? service?.loadFullQuestionHistory
+      : service?.loadFullChatHistory;
+    if (typeof loadHistoryMethod !== 'function') {
       return res.status(400).json({ success: false, error: 'Полная догрузка истории для этого маркетплейса не поддерживается' });
     }
 
     logger.info(`Запрос ручной догрузки истории: ${fullChat.cabinet.name} / ${fullChat.externalChatId}`);
-    const result = await service.loadFullChatHistory(fullChat.cabinet, fullChat);
+    const io = req.app.get('io');
+    const result = await loadHistoryMethod.call(service, fullChat.cabinet, fullChat, io);
     return res.json({ success: true, data: result || { loaded: 0 } });
   } catch (error) {
     next(error);
@@ -345,6 +353,49 @@ exports.markAsRead = async (req, res, next) => {
     });
 
     res.json({ success: true, message: 'Чат помечен как прочитанный' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// PATCH /chats/:chatId/unread — пометить как непрочитанное
+exports.markAsUnread = async (req, res, next) => {
+  try {
+    const conversationType = getConversationTypeFromRequest(req);
+    const { chatId } = req.params;
+    const accessResult = await ensureChatAccess(chatId, req.user, conversationType);
+    if (accessResult.error) {
+      return res.status(accessResult.error.status).json(accessResult.error.body);
+    }
+
+    const lastCustomerMessage = await prisma.chatMessage.findFirst({
+      where: { chatId, senderType: 'CUSTOMER' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, isRead: true },
+    });
+
+    if (lastCustomerMessage && lastCustomerMessage.isRead) {
+      await prisma.chatMessage.update({
+        where: { id: lastCustomerMessage.id },
+        data: { isRead: false },
+      });
+    }
+
+    const unreadCountInMessages = await prisma.chatMessage.count({
+      where: { chatId, senderType: 'CUSTOMER', isRead: false },
+    });
+
+    const unreadCount = Math.max(unreadCountInMessages, 1);
+    await prisma.chat.update({
+      where: { id: chatId },
+      data: { unreadCount },
+    });
+
+    return res.json({
+      success: true,
+      message: 'Чат помечен как непрочитанный',
+      data: { unreadCount },
+    });
   } catch (error) {
     next(error);
   }

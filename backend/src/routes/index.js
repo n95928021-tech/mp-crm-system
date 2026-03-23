@@ -10,7 +10,6 @@ const marketplaceController = require('../controllers/marketplaceController');
 const notificationController = require('../controllers/notificationController');
 
 const router = express.Router();
-let manualSyncInProgress = false;
 
 // ─── Health Check ───
 router.get('/health', (req, res) => {
@@ -37,6 +36,7 @@ router.get('/chats/:chatId/messages/:messageId/media', authenticate, chatControl
 router.post('/chats/:chatId/load-history', authenticate, chatController.useChats, chatController.loadFullHistory);
 router.post('/chats/:chatId/messages', authenticate, chatController.useChats, chatController.sendMessage);
 router.patch('/chats/:chatId/read', authenticate, chatController.useChats, chatController.markAsRead);
+router.patch('/chats/:chatId/unread', authenticate, chatController.useChats, chatController.markAsUnread);
 router.patch('/chats/:chatId/assign', authenticate, chatController.useChats, chatController.assignManager);
 router.patch('/chats/:chatId/status', authenticate, chatController.useChats, chatController.updateStatus);
 
@@ -44,8 +44,10 @@ router.patch('/chats/:chatId/status', authenticate, chatController.useChats, cha
 router.get('/questions', authenticate, chatController.useQuestions, chatController.getChats);
 router.get('/questions/:chatId', authenticate, chatController.useQuestions, chatController.getChatById);
 router.get('/questions/:chatId/messages/:messageId/media', authenticate, chatController.useQuestions, chatController.getMessageMedia);
+router.post('/questions/:chatId/load-history', authenticate, chatController.useQuestions, chatController.loadFullHistory);
 router.post('/questions/:chatId/messages', authenticate, chatController.useQuestions, chatController.sendMessage);
 router.patch('/questions/:chatId/read', authenticate, chatController.useQuestions, chatController.markAsRead);
+router.patch('/questions/:chatId/unread', authenticate, chatController.useQuestions, chatController.markAsUnread);
 router.patch('/questions/:chatId/assign', authenticate, chatController.useQuestions, chatController.assignManager);
 router.patch('/questions/:chatId/status', authenticate, chatController.useQuestions, chatController.updateStatus);
 
@@ -65,7 +67,8 @@ router.patch('/notifications/:id/read', authenticate, notificationController.mar
 // ─── Sync (ручной запуск) ───
 router.post('/sync/manual', authenticate, authorize('ADMIN'), async (req, res) => {
   try {
-    if (manualSyncInProgress) {
+    const { isSyncInFlight, syncAllMarketplaces } = require('../services/marketplaceSync');
+    if (isSyncInFlight()) {
       return res.status(202).json({
         success: true,
         message: 'Синхронизация уже выполняется',
@@ -73,18 +76,12 @@ router.post('/sync/manual', authenticate, authorize('ADMIN'), async (req, res) =
       });
     }
 
-    const { syncAllMarketplaces } = require('../services/marketplaceSync');
     const io = req.app.get('io');
-    manualSyncInProgress = true;
     syncAllMarketplaces(io)
-      .catch((e) => console.error('sync error:', e))
-      .finally(() => {
-        manualSyncInProgress = false;
-      });
+      .catch((e) => console.error('sync error:', e));
 
     res.json({ success: true, message: 'Синхронизация запущена', alreadyRunning: false });
   } catch (e) {
-    manualSyncInProgress = false;
     res.status(500).json({ success: false, error: e.message });
   }
 });
