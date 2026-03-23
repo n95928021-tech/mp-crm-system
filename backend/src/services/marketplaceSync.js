@@ -452,6 +452,104 @@ class WildberriesSyncService extends MarketplaceSyncService {
         });
       }
 
+      const recentEvents = await this.fetchWbEvents(cabinet, {
+        debugLabel: `${cabinet.name}:recent`,
+        maxPages: 5,
+        pageDelayMs: 150,
+      });
+      if (recentEvents[0]) {
+        logger.debug(`WB ${cabinet.name}: sample recent event payload ${JSON.stringify(recentEvents[0]).slice(0, 2500)}`);
+      }
+
+      const recentEventsByChatId = new Map();
+      for (const event of recentEvents) {
+        const chatId = this.getWbEventChatId(event);
+        if (!chatId) continue;
+        if (!recentEventsByChatId.has(chatId)) recentEventsByChatId.set(chatId, []);
+        recentEventsByChatId.get(chatId).push(event);
+      }
+
+      for (const [chatId, chatEventsRaw] of recentEventsByChatId.entries()) {
+        const chatEvents = chatEventsRaw.sort((a, b) => {
+          return this.parseMessageDate(this.getWbEventCreatedAt(a)) - this.parseMessageDate(this.getWbEventCreatedAt(b));
+        });
+
+        let meta = savedChats.get(chatId);
+        if (!meta) {
+          const externalChatId = `wb-chat-${chatId}`;
+          const existingChat = await prisma.chat.findFirst({
+            where: {
+              cabinetId: cabinet.id,
+              externalChatId,
+              conversationType: 'CHAT',
+            },
+          });
+
+          meta = {
+            chatRecord: existingChat,
+            externalChatId,
+            customerName: this.getWbEventCustomerName(chatEvents[chatEvents.length - 1]) || 'Покупатель WB',
+            unreadCountInfo: { present: false, value: 0 },
+            listLastMessageAt: null,
+            listLastMessageText: null,
+          };
+          savedChats.set(chatId, meta);
+        }
+
+        for (const event of chatEvents) {
+          const media = this.getWbEventMedia(event);
+          const text = this.getWbEventText(event) || (media?.messageType === 'IMAGE' ? '📷 Фотография' : media?.messageType === 'FILE' ? '📎 Файл' : '');
+          if (!text && !media?.mediaUrl) continue;
+          const eventCreatedAt = this.parseMessageDate(this.getWbEventCreatedAt(event));
+
+          await this.processIncomingMessage(cabinet, {
+            externalChatId: meta.externalChatId,
+            customerName: this.getWbEventCustomerName(event) || meta.customerName,
+            text,
+            messageType: media?.messageType || 'TEXT',
+            mediaUrl: media?.mediaUrl || null,
+            thumbnailUrl: media?.thumbnailUrl || null,
+            mediaMimeType: media?.mediaMimeType || null,
+            externalMsgId: `wb-chat-event-${this.getWbEventId(event) || `${chatId}-${this.getWbEventCreatedAt(event)}`}`,
+            conversationType: 'CHAT',
+            senderType: this.getWbEventSenderType(event),
+            createdAt: eventCreatedAt,
+          }, io);
+        }
+
+        const lastEvent = chatEvents[chatEvents.length - 1];
+        const lastEventAt = this.parseMessageDate(this.getWbEventCreatedAt(lastEvent));
+        const derivedUnreadCount = this.deriveWbUnreadCount(chatEvents);
+        const lastEventText = this.getWbEventText(lastEvent) || meta.listLastMessageText || meta.chatRecord?.lastMessageText || '';
+
+        let chatRecordId = meta.chatRecord?.id;
+        if (!chatRecordId) {
+          const createdChat = await prisma.chat.findFirst({
+            where: {
+              cabinetId: cabinet.id,
+              externalChatId: meta.externalChatId,
+              conversationType: 'CHAT',
+            },
+          });
+          if (createdChat) {
+            chatRecordId = createdChat.id;
+            meta.chatRecord = createdChat;
+          }
+        }
+
+        if (chatRecordId) {
+          await prisma.chat.update({
+            where: { id: chatRecordId },
+            data: {
+              customerName: this.getWbEventCustomerName(lastEvent) || meta.customerName || meta.chatRecord?.customerName,
+              lastMessageText: lastEventText,
+              lastMessageAt: lastEventAt,
+              unreadCount: meta.unreadCountInfo.present ? meta.unreadCountInfo.value : derivedUnreadCount,
+            },
+          });
+        }
+      }
+
       const prioritizedChatIds = normalizedChats
         .slice()
         .sort((a, b) => {
