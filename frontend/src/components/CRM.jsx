@@ -489,10 +489,15 @@ const ChatItemWithTimer = ({ chat, mp: mpProp, active, onClick, onContextMenu, g
 
   const displayName = normalizeCustomerName(chat.customerName, chat.marketplaceId);
   const avatarLetter = displayName[0] || "D";
-  const timeLabel = new Date(chat.lastMessageTime).toLocaleTimeString("ru-RU", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const messageDate = new Date(chat.lastMessageTime);
+  const today = new Date();
+  const isToday =
+    messageDate.getFullYear() === today.getFullYear() &&
+    messageDate.getMonth() === today.getMonth() &&
+    messageDate.getDate() === today.getDate();
+  const timeLabel = isToday
+    ? messageDate.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
+    : messageDate.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
 
   return (
     <div
@@ -740,6 +745,16 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [newCabinetName, setNewCabinetName] = useState("");
   const [cabinetAdding, setCabinetAdding] = useState(false);
   const [expandedMp, setExpandedMp] = useState({}); // { mpId: true/false }
+  const [usersList, setUsersList] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [userSaving, setUserSaving] = useState(false);
+  const [newUserForm, setNewUserForm] = useState({
+    firstName: "",
+    lastName: "",
+    email: "",
+    password: "",
+    role: "MANAGER",
+  });
 
   // ─── Загрузка маркетплейсов и кабинетов из API ───
   const loadMarketplaces = useCallback(async () => {
@@ -773,6 +788,21 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       console.error("Ошибка загрузки маркетплейсов:", e);
     }
   }, [apiUrl]);
+
+  const loadUsers = useCallback(async () => {
+    if (!apiUrl || user?.role !== "ADMIN") return;
+    try {
+      setUsersLoading(true);
+      const res = await fetch(`${apiUrl}/users`, { headers: getHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      setUsersList(data.data || []);
+    } catch (e) {
+      console.error("Ошибка загрузки пользователей:", e);
+    } finally {
+      setUsersLoading(false);
+    }
+  }, [apiUrl, getHeaders, user?.role]);
 
   // ─── Загрузка чатов из API ───
   const loadChats = useCallback(async () => {
@@ -1132,6 +1162,12 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [selectedChat, chats]);
+
+  useEffect(() => {
+    if (settingsTab === "users" && user?.role === "ADMIN") {
+      loadUsers();
+    }
+  }, [settingsTab, user?.role, loadUsers]);
 
   const filteredChats = useMemo(() => {
     let result = chats;
@@ -2157,6 +2193,66 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       }
     };
 
+    const createUser = async () => {
+      if (!newUserForm.email.trim() || !newUserForm.password.trim() || !newUserForm.firstName.trim() || !newUserForm.lastName.trim()) {
+        setSettingsSaved("Ошибка: заполните все поля пользователя");
+        setTimeout(() => setSettingsSaved(null), 2500);
+        return;
+      }
+      setUserSaving(true);
+      try {
+        const res = await fetch(`${apiUrl}/users`, {
+          method: "POST",
+          headers: getHeaders(),
+          body: JSON.stringify({
+            firstName: newUserForm.firstName.trim(),
+            lastName: newUserForm.lastName.trim(),
+            email: newUserForm.email.trim().toLowerCase(),
+            password: newUserForm.password,
+            role: newUserForm.role === "ADMIN" ? "ADMIN" : "MANAGER",
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setSettingsSaved(`Ошибка: ${data.error || "не удалось создать пользователя"}`);
+          setTimeout(() => setSettingsSaved(null), 3000);
+          return;
+        }
+        setNewUserForm({ firstName: "", lastName: "", email: "", password: "", role: "MANAGER" });
+        setSettingsSaved("Пользователь создан");
+        setTimeout(() => setSettingsSaved(null), 2000);
+        await loadUsers();
+      } catch (e) {
+        setSettingsSaved("Ошибка сети");
+        setTimeout(() => setSettingsSaved(null), 3000);
+      } finally {
+        setUserSaving(false);
+      }
+    };
+
+    const patchUser = async (userId, patch) => {
+      setUserSaving(true);
+      try {
+        const res = await fetch(`${apiUrl}/users/${userId}`, {
+          method: "PATCH",
+          headers: getHeaders(),
+          body: JSON.stringify(patch),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setSettingsSaved(`Ошибка: ${data.error || "не удалось обновить пользователя"}`);
+          setTimeout(() => setSettingsSaved(null), 3000);
+          return;
+        }
+        await loadUsers();
+      } catch (e) {
+        setSettingsSaved("Ошибка сети");
+        setTimeout(() => setSettingsSaved(null), 3000);
+      } finally {
+        setUserSaving(false);
+      }
+    };
+
     return (
       <div style={{ flex: 1, overflow: "auto", padding: 24 }}>
         {/* Header */}
@@ -2183,6 +2279,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
         <div style={{ display: "flex", gap: 4, marginBottom: 24, borderBottom: "1px solid rgba(255,255,255,0.06)", paddingBottom: 0 }}>
           {[
             { v: "cabinets", l: "Кабинеты и API" },
+            ...(user?.role === "ADMIN" ? [{ v: "users", l: "Пользователи" }] : []),
             { v: "system", l: "Система" },
           ].map(({ v, l }) => (
             <button key={v} onClick={() => setSettingsTab(v)} style={{
@@ -2396,6 +2493,138 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* Users tab */}
+        {settingsTab === "users" && user?.role === "ADMIN" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 960 }}>
+            <div style={{
+              padding: "16px 18px", borderRadius: 14,
+              background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Новый пользователь</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(120px, 1fr)) 130px", gap: 8 }}>
+                <input
+                  style={{ ...S.input, fontSize: 12, padding: "8px 10px" }}
+                  placeholder="Имя"
+                  value={newUserForm.firstName}
+                  onChange={(e) => setNewUserForm((p) => ({ ...p, firstName: e.target.value }))}
+                />
+                <input
+                  style={{ ...S.input, fontSize: 12, padding: "8px 10px" }}
+                  placeholder="Фамилия"
+                  value={newUserForm.lastName}
+                  onChange={(e) => setNewUserForm((p) => ({ ...p, lastName: e.target.value }))}
+                />
+                <input
+                  style={{ ...S.input, fontSize: 12, padding: "8px 10px" }}
+                  placeholder="Email"
+                  value={newUserForm.email}
+                  onChange={(e) => setNewUserForm((p) => ({ ...p, email: e.target.value }))}
+                />
+                <input
+                  style={{ ...S.input, fontSize: 12, padding: "8px 10px" }}
+                  placeholder="Пароль"
+                  type="password"
+                  value={newUserForm.password}
+                  onChange={(e) => setNewUserForm((p) => ({ ...p, password: e.target.value }))}
+                />
+                <select
+                  style={{ ...S.input, fontSize: 12, padding: "8px 10px" }}
+                  value={newUserForm.role}
+                  onChange={(e) => setNewUserForm((p) => ({ ...p, role: e.target.value }))}
+                >
+                  <option value="MANAGER">MANAGER</option>
+                  <option value="ADMIN">ADMIN</option>
+                </select>
+                <button
+                  onClick={createUser}
+                  disabled={userSaving}
+                  style={{ ...S.btn("#22c55e"), padding: "8px 12px", opacity: userSaving ? 0.6 : 1, fontSize: 12 }}
+                >
+                  {userSaving ? "..." : "Создать"}
+                </button>
+              </div>
+            </div>
+
+            <div style={{
+              padding: "14px 16px", borderRadius: 14,
+              background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>Пользователи системы</div>
+                <button
+                  onClick={loadUsers}
+                  style={{ ...S.btn("#475569"), fontSize: 11, padding: "6px 10px" }}
+                >
+                  Обновить
+                </button>
+              </div>
+
+              {usersLoading ? (
+                <div style={{ fontSize: 12, color: "#64748b", padding: "8px 2px" }}>Загрузка пользователей...</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {usersList.map((u) => (
+                    <div
+                      key={u.id}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "2fr 1.2fr 130px 100px 90px 120px",
+                        alignItems: "center",
+                        gap: 10,
+                        padding: "8px 10px",
+                        borderRadius: 10,
+                        background: "rgba(255,255,255,0.02)",
+                        border: "1px solid rgba(255,255,255,0.04)",
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 13, color: "#e2e8f0", fontWeight: 600 }}>
+                          {u.firstName} {u.lastName}
+                        </div>
+                        <div style={{ fontSize: 11, color: "#64748b" }}>{u.email}</div>
+                      </div>
+                      <div style={{ fontSize: 11, color: "#64748b" }}>
+                        {u.lastLoginAt ? `Вход: ${new Date(u.lastLoginAt).toLocaleString("ru-RU")}` : "Входов не было"}
+                      </div>
+                      <select
+                        style={{ ...S.input, fontSize: 11, padding: "6px 8px" }}
+                        value={u.role === "ADMIN" ? "ADMIN" : "MANAGER"}
+                        onChange={(e) => patchUser(u.id, { role: e.target.value })}
+                        disabled={userSaving || u.id === user?.id}
+                      >
+                        <option value="MANAGER">MANAGER</option>
+                        <option value="ADMIN">ADMIN</option>
+                      </select>
+                      <div style={{ fontSize: 11, color: "#64748b" }}>{u.cabinetIds?.length || 0} каб.</div>
+                      <span style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: u.isActive ? "#22c55e" : "#ef4444",
+                        background: u.isActive ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)",
+                        padding: "3px 8px",
+                        borderRadius: 999,
+                        textAlign: "center",
+                      }}>
+                        {u.isActive ? "ACTIVE" : "OFF"}
+                      </span>
+                      <button
+                        onClick={() => patchUser(u.id, { isActive: !u.isActive })}
+                        style={{ ...S.btn(u.isActive ? "#ef4444" : "#22c55e"), fontSize: 11, padding: "6px 10px" }}
+                        disabled={u.id === user?.id || userSaving}
+                      >
+                        {u.isActive ? "Отключить" : "Включить"}
+                      </button>
+                    </div>
+                  ))}
+                  {!usersList.length && (
+                    <div style={{ fontSize: 12, color: "#64748b", padding: "8px 2px" }}>Пользователей пока нет</div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

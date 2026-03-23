@@ -429,7 +429,17 @@ class WildberriesSyncService extends MarketplaceSyncService {
             },
           });
         } else {
-          const nextUnreadCount = unreadCountInfo.present ? unreadCountInfo.value : existingChat.unreadCount;
+          const hasNewerListMessage = !!(
+            lastMessageAt &&
+            (!existingChat.lastMessageAt || lastMessageAt > existingChat.lastMessageAt)
+          );
+          const nextUnreadCount = unreadCountInfo.present
+            ? (
+              unreadCountInfo.value > 0
+                ? unreadCountInfo.value
+                : (hasNewerListMessage ? 0 : existingChat.unreadCount)
+            )
+            : existingChat.unreadCount;
           chatRecord = await prisma.chat.update({
             where: { id: existingChat.id },
             data: {
@@ -454,8 +464,9 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
       const recentEvents = await this.fetchWbEvents(cabinet, {
         debugLabel: `${cabinet.name}:recent`,
-        maxPages: 5,
-        pageDelayMs: 150,
+        maxPages: 40,
+        pageDelayMs: 120,
+        minCreatedAtMs: Date.now() - (36 * 60 * 60 * 1000),
       });
       if (recentEvents[0]) {
         logger.debug(`WB ${cabinet.name}: sample recent event payload ${JSON.stringify(recentEvents[0]).slice(0, 2500)}`);
@@ -544,7 +555,9 @@ class WildberriesSyncService extends MarketplaceSyncService {
               customerName: this.getWbEventCustomerName(lastEvent) || meta.customerName || meta.chatRecord?.customerName,
               lastMessageText: lastEventText,
               lastMessageAt: lastEventAt,
-              unreadCount: meta.unreadCountInfo.present ? meta.unreadCountInfo.value : derivedUnreadCount,
+              unreadCount: meta.unreadCountInfo.present
+                ? Math.max(meta.unreadCountInfo.value, derivedUnreadCount)
+                : derivedUnreadCount,
             },
           });
         }
@@ -615,7 +628,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
           };
 
           if (meta.unreadCountInfo.present) {
-            updateData.unreadCount = meta.unreadCountInfo.value;
+            updateData.unreadCount = Math.max(meta.unreadCountInfo.value, derivedUnreadCount);
           } else if (derivedUnreadCount > 0) {
             updateData.unreadCount = derivedUnreadCount;
           } else {
@@ -1225,6 +1238,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
       pageDelayMs = 1100,
       stopAfterInitialQuietPages = 0,
       stopAfterTargetQuietPages = 0,
+      minCreatedAtMs = null,
     } = options;
     const targetSet = Array.isArray(targetChatIds) && targetChatIds.length ? new Set(targetChatIds.map(String)) : null;
     let hasMatchedTarget = false;
@@ -1303,6 +1317,20 @@ class WildberriesSyncService extends MarketplaceSyncService {
         }
       } else {
         if (totalEvents === 0 || !nextCursor || added === 0) break;
+
+        if (minCreatedAtMs) {
+          let oldestMs = Number.POSITIVE_INFINITY;
+          for (const event of normalizedEvents) {
+            const ms = this.parseMessageDate(this.getWbEventCreatedAt(event)).getTime();
+            if (Number.isFinite(ms) && ms < oldestMs) oldestMs = ms;
+          }
+          if (Number.isFinite(oldestMs) && oldestMs < minCreatedAtMs) {
+            if (debugLabel) {
+              logger.debug(`WB events ${debugLabel}: stop by age boundary ${new Date(oldestMs).toISOString()} < ${new Date(minCreatedAtMs).toISOString()}`);
+            }
+            break;
+          }
+        }
       }
       next = nextCursor;
       page += 1;
@@ -1887,6 +1915,11 @@ class OzonSyncService extends MarketplaceSyncService {
       source.shop_sku ||
       source.shopSku ||
       source.article ||
+      source.context?.sku ||
+      source.context?.seller_sku ||
+      source.context?.vendor_code ||
+      source.last_message?.context?.sku ||
+      source.last_message?.context?.seller_sku ||
       source.product?.seller_sku ||
       source.product?.sellerSku ||
       source.product?.vendor_code ||
@@ -1917,10 +1950,28 @@ class OzonSyncService extends MarketplaceSyncService {
       ''
     ).toString().trim();
 
-    const skuRaw = source.sku || source.sku_id || source.skuId || source.product?.sku || source.product?.sku_id || source.product?.skuId || '';
+    const skuRaw =
+      source.sku ||
+      source.sku_id ||
+      source.skuId ||
+      source.context?.sku ||
+      source.last_message?.context?.sku ||
+      source.product?.sku ||
+      source.product?.sku_id ||
+      source.product?.skuId ||
+      '';
     const sku = skuRaw === '' || skuRaw === null || skuRaw === undefined ? null : String(skuRaw).trim();
 
-    const productIdRaw = source.product_id || source.productId || source.item_id || source.itemId || source.product?.id || source.offer?.product_id || '';
+    const productIdRaw =
+      source.product_id ||
+      source.productId ||
+      source.item_id ||
+      source.itemId ||
+      source.context?.product_id ||
+      source.last_message?.context?.product_id ||
+      source.product?.id ||
+      source.offer?.product_id ||
+      '';
     const productId = productIdRaw === '' || productIdRaw === null || productIdRaw === undefined ? null : String(productIdRaw).trim();
 
     const productImage = this.extractProductImageUrl(source) || '';
@@ -2102,10 +2153,20 @@ class OzonSyncService extends MarketplaceSyncService {
     const matched = (Array.isArray(chats) ? chats : []).find((item) => String(this.getOzonChatId(item, item.chat || item) || '') === String(chatId));
     if (!matched) return null;
 
+    const messages = await this.fetchOzonHistory(cabinet, chatId);
+    const contextSeed = [...messages]
+      .reverse()
+      .find((msg) => {
+        const ctx = msg?.context || msg?.message?.context || msg?.payload?.context || null;
+        return ctx && (ctx.sku || ctx.sku_id || ctx.product_id || ctx.offer_id || ctx.order_number);
+      }) || null;
+
     const meta = await this.enrichOzonProductMetadata(cabinet, this.extractOzonProductMetadata({
       ...matched,
       ...(matched.chat || {}),
       last_message: matched.last_message || matched.chat?.last_message || null,
+      context: contextSeed?.context || contextSeed?.message?.context || contextSeed?.payload?.context || null,
+      message: contextSeed || null,
     }));
 
     return {

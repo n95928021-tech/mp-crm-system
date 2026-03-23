@@ -8,6 +8,7 @@ const taskController = require('../controllers/taskController');
 const analyticsController = require('../controllers/analyticsController');
 const marketplaceController = require('../controllers/marketplaceController');
 const notificationController = require('../controllers/notificationController');
+const userController = require('../controllers/userController');
 
 const router = express.Router();
 
@@ -22,6 +23,11 @@ router.post('/auth/login', authController.login);
 router.post('/auth/refresh', authController.refreshToken);
 router.post('/auth/logout', authenticate, authController.logout);
 router.get('/auth/me', authenticate, authController.getMe);
+
+// ─── Users (ADMIN) ───
+router.get('/users', authenticate, authorize('ADMIN'), userController.getUsers);
+router.post('/users', authenticate, authorize('ADMIN'), userController.createUser);
+router.patch('/users/:userId', authenticate, authorize('ADMIN'), userController.updateUser);
 
 // ─── Marketplaces & Cabinets ───
 router.get('/marketplaces', authenticate, marketplaceController.getMarketplaces);

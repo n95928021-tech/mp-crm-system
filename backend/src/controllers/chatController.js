@@ -11,17 +11,11 @@ const compareChatsForList = (a, b) => {
   const bTime = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
   if (bTime !== aTime) return bTime - aTime;
 
-  const aKey = a.customerExternalId || '';
-  const bKey = b.customerExternalId || '';
+  const aUpdated = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+  const bUpdated = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+  if (bUpdated !== aUpdated) return bUpdated - aUpdated;
 
-  if (/^\d+$/.test(aKey) && /^\d+$/.test(bKey)) {
-    const aSort = BigInt(aKey);
-    const bSort = BigInt(bKey);
-    if (aSort > bSort) return -1;
-    if (aSort < bSort) return 1;
-  }
-
-  return 0;
+  return String(a.id || '').localeCompare(String(b.id || ''));
 };
 
 const ensureChatAccess = async (chatId, user, conversationType = 'CHAT') => {
