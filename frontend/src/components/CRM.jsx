@@ -731,6 +731,7 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifLoading, setNotifLoading] = useState(false);
   const [manualSyncRunning, setManualSyncRunning] = useState(false);
+  const [reviewSyncRunning, setReviewSyncRunning] = useState(false);
   const [chatContextMenu, setChatContextMenu] = useState(null);
   // ─── Поиск ───
   const [chatSearch, setChatSearch] = useState("");
@@ -3059,6 +3060,31 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   disabled={manualSyncRunning}
                 >
                   {manualSyncRunning ? "↻ Синхронизация..." : "↻ Синхронизировать"}
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!apiUrl || reviewSyncRunning) return;
+                    try {
+                      setReviewSyncRunning(true);
+                      await fetch(`${apiUrl}/sync/reviews/manual`, { method: "POST", headers: getHeaders() });
+                      await loadChats();
+                      await loadQuestions();
+                    } catch (e) {
+                      console.error("Ошибка синхронизации отзывов:", e);
+                    } finally {
+                      setReviewSyncRunning(false);
+                    }
+                  }}
+                  style={{
+                    background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.15)",
+                    borderRadius: 6, padding: "4px 10px", color: "#60a5fa", cursor: reviewSyncRunning ? "default" : "pointer",
+                    fontSize: 11, fontFamily: "inherit", marginRight: 4,
+                    opacity: reviewSyncRunning ? 0.6 : 1,
+                  }}
+                  title="Синхронизировать отзывы WB/Ozon"
+                  disabled={reviewSyncRunning}
+                >
+                  {reviewSyncRunning ? "📝 Отзывы..." : "📝 Отзывы"}
                 </button>
                 <button
                   onClick={() => isQuestionsView ? loadQuestions() : loadChats()}

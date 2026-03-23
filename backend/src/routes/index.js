@@ -92,6 +92,17 @@ router.post('/sync/manual', authenticate, authorize('ADMIN'), async (req, res) =
   }
 });
 
+router.post('/sync/reviews/manual', authenticate, authorize('ADMIN'), async (req, res) => {
+  try {
+    const { syncReviewsOnly } = require('../services/marketplaceSync');
+    const io = req.app.get('io');
+    syncReviewsOnly(io).catch((e) => console.error('reviews sync error:', e));
+    res.json({ success: true, message: 'Синхронизация отзывов запущена' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ─── Analytics ───
 router.get('/analytics/response-time', authenticate, analyticsController.getResponseTimeAnalytics);
 router.get('/analytics/response-time/export', authenticate, analyticsController.exportResponseTimeCSV);

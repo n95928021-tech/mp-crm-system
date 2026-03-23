@@ -504,16 +504,8 @@ class WildberriesSyncService extends MarketplaceSyncService {
             },
           });
         } else {
-          const hasNewerListMessage = !!(
-            lastMessageAt &&
-            (!existingChat.lastMessageAt || lastMessageAt > existingChat.lastMessageAt)
-          );
           const nextUnreadCount = unreadCountInfo.present
-            ? (
-              unreadCountInfo.value > 0
-                ? unreadCountInfo.value
-                : (hasNewerListMessage ? 0 : existingChat.unreadCount)
-            )
+            ? Math.max(existingChat.unreadCount || 0, unreadCountInfo.value)
             : existingChat.unreadCount;
           chatRecord = await prisma.chat.update({
             where: { id: existingChat.id },
@@ -631,7 +623,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
               lastMessageText: lastEventText,
               lastMessageAt: lastEventAt,
               unreadCount: meta.unreadCountInfo.present
-                ? Math.max(meta.unreadCountInfo.value, derivedUnreadCount)
+                ? Math.max(meta.chatRecord?.unreadCount || 0, meta.unreadCountInfo.value, derivedUnreadCount)
                 : derivedUnreadCount,
             },
           });
@@ -703,22 +695,9 @@ class WildberriesSyncService extends MarketplaceSyncService {
           };
 
           if (meta.unreadCountInfo.present) {
-            updateData.unreadCount = Math.max(meta.unreadCountInfo.value, derivedUnreadCount);
+            updateData.unreadCount = Math.max(meta.chatRecord?.unreadCount || 0, meta.unreadCountInfo.value, derivedUnreadCount);
           } else if (derivedUnreadCount > 0) {
-            updateData.unreadCount = derivedUnreadCount;
-          } else {
-            const confidentManagerReply = (
-              chatEvents.length > 0 &&
-              this.getWbEventSenderType(lastEvent) === 'MANAGER' &&
-              (
-                !meta.listLastMessageAt ||
-                Math.abs(lastEventAt.getTime() - meta.listLastMessageAt.getTime()) <= 5 * 60 * 1000 ||
-                lastEventAt >= meta.listLastMessageAt
-              )
-            );
-            if (confidentManagerReply) {
-              updateData.unreadCount = 0;
-            }
+            updateData.unreadCount = Math.max(meta.chatRecord?.unreadCount || 0, derivedUnreadCount);
           }
 
           await prisma.chat.update({
@@ -3137,10 +3116,31 @@ const syncAllMarketplaces = async (io) => {
   }
 };
 
+const syncReviewsOnly = async (io) => {
+  const cabinets = await prisma.cabinet.findMany({
+    where: { isActive: true },
+    include: { marketplace: true },
+  });
+
+  const targetCabinets = cabinets.filter((cabinet) => ['wb', 'ozon'].includes(cabinet.marketplace.slug));
+  for (const cabinet of targetCabinets) {
+    const service = getSyncService(cabinet.marketplace.slug);
+    if (!service || typeof service.syncReviews !== 'function') continue;
+    try {
+      logger.info(`Запуск синхронизации отзывов: ${cabinet.marketplace.name} ${cabinet.name}`);
+      await service.syncReviews(cabinet, io);
+      logger.info(`Завершена синхронизация отзывов: ${cabinet.marketplace.name} ${cabinet.name}`);
+    } catch (error) {
+      logger.error(`Ошибка синхронизации отзывов ${cabinet.name}: ${error.message}`);
+    }
+  }
+};
+
 module.exports = {
   getSyncService,
   isSyncInFlight,
   syncAllMarketplaces,
+  syncReviewsOnly,
   WildberriesSyncService,
   OzonSyncService,
   YandexMarketSyncService,
