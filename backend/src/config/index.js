@@ -28,6 +28,7 @@ module.exports = {
   marketplaces: {
     wb: {
       baseUrl: process.env.WB_API_BASE_URL || 'https://feedbacks-api.wildberries.ru',
+      feedbackListPath: process.env.WB_FEEDBACK_LIST_PATH || '/api/v1/feedbacks',
       chatBaseUrl: process.env.WB_CHAT_API_BASE_URL || 'https://buyer-chat-api.wildberries.ru',
       chatListPath: process.env.WB_CHAT_LIST_PATH || '/api/v1/seller/chats',
       chatEventsPath: process.env.WB_CHAT_EVENTS_PATH || '/api/v1/seller/events',
@@ -45,6 +46,7 @@ module.exports = {
       baseUrl: process.env.OZON_API_BASE_URL || 'https://api-seller.ozon.ru',
       chatListPath: process.env.OZON_CHAT_LIST_PATH || '/v3/chat/list',
       chatHistoryPath: process.env.OZON_CHAT_HISTORY_PATH || '/v3/chat/history',
+      reviewListPath: process.env.OZON_REVIEW_LIST_PATH || '/v1/review/list',
       productInfoListPath: process.env.OZON_PRODUCT_INFO_LIST_PATH || '/v3/product/info/list',
       questionListPath: process.env.OZON_QUESTION_LIST_PATH || '/v1/question/list',
       questionInfoPath: process.env.OZON_QUESTION_INFO_PATH || '/v1/question/info',

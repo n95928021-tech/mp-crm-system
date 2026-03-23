@@ -59,6 +59,10 @@ class MarketplaceSyncService {
     return null;
   }
 
+  async syncReviews(_cabinet, _io) {
+    return null;
+  }
+
   extractMarkdownMedia(text) {
     if (!text || typeof text !== 'string') return null;
 
@@ -92,6 +96,76 @@ class MarketplaceSyncService {
       .replace(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi, '')
       .replace(/\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi, '')
       .trim();
+  }
+
+  normalizeReviewText(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value.trim();
+    if (Array.isArray(value)) return value.map((v) => this.normalizeReviewText(v)).filter(Boolean).join('\n').trim();
+    if (typeof value === 'object') {
+      return this.normalizeReviewText(
+        value.text ||
+        value.comment ||
+        value.body ||
+        value.content ||
+        value.description ||
+        ''
+      );
+    }
+    return String(value).trim();
+  }
+
+  composeReviewMessage(review) {
+    const rating = Number(review.rating || 0) || 0;
+    const ratingLabel = rating > 0 ? `${rating}/5` : 'без оценки';
+    const text = this.normalizeReviewText(review.text);
+    const pros = this.normalizeReviewText(review.pros);
+    const cons = this.normalizeReviewText(review.cons);
+
+    const parts = [`📝 Отзыв покупателя (${ratingLabel})`];
+    if (text) parts.push(text);
+    if (pros) parts.push(`Плюсы: ${pros}`);
+    if (cons) parts.push(`Минусы: ${cons}`);
+    return parts.join('\n').trim();
+  }
+
+  async findChatForReview(cabinet, review) {
+    const customerName = String(review.customerName || '').trim().toLowerCase();
+    const orderId = String(review.orderId || '').trim().toLowerCase();
+
+    const chats = await prisma.chat.findMany({
+      where: {
+        cabinetId: cabinet.id,
+        conversationType: 'CHAT',
+      },
+      orderBy: { lastMessageAt: 'desc' },
+      take: 250,
+      select: {
+        id: true,
+        externalChatId: true,
+        customerName: true,
+        lastMessageText: true,
+        lastMessageAt: true,
+      },
+    });
+
+    let best = null;
+    let bestScore = -1;
+    for (const chat of chats) {
+      let score = 0;
+      const chatCustomerName = String(chat.customerName || '').trim().toLowerCase();
+      const chatLastText = String(chat.lastMessageText || '').trim().toLowerCase();
+
+      if (customerName && chatCustomerName && customerName === chatCustomerName) score += 35;
+      if (orderId && chatLastText && chatLastText.includes(orderId)) score += 25;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = chat;
+      }
+    }
+
+    return bestScore >= 35 ? best : null;
   }
 
   extractProductImageUrl(payload, depth = 0) {
@@ -291,6 +365,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
     this.chatEventsPath = config.marketplaces.wb.chatEventsPath;
     this.chatMessagePath = config.marketplaces.wb.chatMessagePath;
     this.chatDownloadPath = config.marketplaces.wb.chatDownloadPath;
+    this.feedbackListPath = config.marketplaces.wb.feedbackListPath;
     this.wbImageUrlCache = new Map();
   }
 
@@ -973,6 +1048,140 @@ class WildberriesSyncService extends MarketplaceSyncService {
     }
   }
 
+  normalizeWbReview(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const reviewId = String(raw.id || raw.feedbackId || raw.feedback_id || '').trim();
+    if (!reviewId) return null;
+
+    const rating = Number(
+      raw.productValuation ||
+      raw.valuation ||
+      raw.rating ||
+      raw.grade ||
+      0
+    ) || 0;
+
+    const text = this.normalizeReviewText(
+      raw.text ||
+      raw.comment ||
+      raw.feedback ||
+      raw.body ||
+      ''
+    );
+
+    const pros = this.normalizeReviewText(raw.pros || raw.dignity || raw.advantages || '');
+    const cons = this.normalizeReviewText(raw.cons || raw.flaws || raw.disadvantages || '');
+    const customerName = (
+      raw.userName ||
+      raw.user_name ||
+      raw.wbUserDetails?.name ||
+      raw.userDetails?.name ||
+      ''
+    ).toString().trim();
+
+    return {
+      id: reviewId,
+      rating,
+      text,
+      pros,
+      cons,
+      customerName,
+      sellerArticle: (
+        raw.productDetails?.supplierArticle ||
+        raw.productDetails?.vendorCode ||
+        raw.supplierArticle ||
+        raw.vendorCode ||
+        ''
+      ).toString().trim(),
+      productTitle: (
+        raw.productDetails?.productName ||
+        raw.productDetails?.name ||
+        raw.productName ||
+        ''
+      ).toString().trim(),
+      orderId: (
+        raw.orderId ||
+        raw.order_id ||
+        raw.nmId ||
+        raw.nm_id ||
+        ''
+      ).toString().trim(),
+      createdAt: raw.createdDate || raw.createdAt || raw.created_at || new Date().toISOString(),
+    };
+  }
+
+  async fetchWbReviews(cabinet) {
+    const headers = { Authorization: cabinet.apiToken };
+    const variants = [
+      { isAnswered: false, take: 100, skip: 0, order: 'dateDesc' },
+      { isAnswered: true, take: 100, skip: 0, order: 'dateDesc' },
+      { take: 100, skip: 0 },
+    ];
+
+    const all = [];
+    const seen = new Set();
+    for (const params of variants) {
+      try {
+        const response = await axios.get(`${this.baseUrl}${this.feedbackListPath}`, {
+          headers,
+          params,
+          timeout: 10000,
+        });
+        const rows =
+          response.data?.data?.feedbacks ||
+          response.data?.feedbacks ||
+          response.data?.data?.items ||
+          response.data?.items ||
+          [];
+        for (const raw of (Array.isArray(rows) ? rows : [])) {
+          const normalized = this.normalizeWbReview(raw);
+          if (!normalized || seen.has(normalized.id)) continue;
+          seen.add(normalized.id);
+          all.push(normalized);
+        }
+      } catch (error) {
+        logger.debug(`WB ${cabinet.name}: reviews fetch variant failed (${JSON.stringify(params)}): ${error.response?.status || ''} ${error.message}`);
+      }
+    }
+    return all;
+  }
+
+  async syncReviews(cabinet) {
+    try {
+      if (!cabinet.apiToken) return;
+
+      const reviews = await this.fetchWbReviews(cabinet);
+      if (!reviews.length) {
+        logger.info(`WB ${cabinet.name}: отзывы не найдены или API не вернул данные`);
+        return;
+      }
+
+      let attached = 0;
+      for (const review of reviews) {
+        const chat = await this.findChatForReview(cabinet, review);
+        if (!chat || !chat.externalChatId) continue;
+
+        const text = this.composeReviewMessage(review);
+        if (!text) continue;
+
+        const inserted = await this.processIncomingMessage(cabinet, {
+          externalChatId: chat.externalChatId || '',
+          customerName: review.customerName || chat.customerName || 'Покупатель WB',
+          text,
+          externalMsgId: `wb-review-${review.id}`,
+          senderType: 'SYSTEM',
+          conversationType: 'CHAT',
+          createdAt: review.createdAt,
+        });
+        if (inserted) attached += 1;
+      }
+
+      logger.info(`WB ${cabinet.name}: синхронизировано отзывов ${reviews.length}, привязано к чатам ${attached}`);
+    } catch (error) {
+      logger.error(`WB ${cabinet.name} ошибка синхронизации отзывов: ${error.message} | response: ${JSON.stringify(error.response?.data)}`);
+    }
+  }
+
   async sendMessage(cabinet, externalChatId, text, context = {}) {
     try {
       if (externalChatId.startsWith('wb-chat-')) {
@@ -1348,6 +1557,7 @@ class OzonSyncService extends MarketplaceSyncService {
     this.baseUrl = config.marketplaces.ozon.baseUrl;
     this.chatListPath = config.marketplaces.ozon.chatListPath;
     this.chatHistoryPath = config.marketplaces.ozon.chatHistoryPath;
+    this.reviewListPath = config.marketplaces.ozon.reviewListPath;
     this.productInfoListPath = config.marketplaces.ozon.productInfoListPath;
     this.questionListPath = config.marketplaces.ozon.questionListPath;
     this.questionInfoPath = config.marketplaces.ozon.questionInfoPath;
@@ -2444,6 +2654,131 @@ class OzonSyncService extends MarketplaceSyncService {
     }
   }
 
+  normalizeOzonReview(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const reviewId = String(raw.review_id || raw.reviewId || raw.id || '').trim();
+    if (!reviewId) return null;
+
+    const rating = Number(raw.rating || raw.score || raw.stars || 0) || 0;
+    const text = this.normalizeReviewText(raw.text || raw.comment || raw.content || raw.body || '');
+    const pros = this.normalizeReviewText(raw.pros || raw.advantages || '');
+    const cons = this.normalizeReviewText(raw.cons || raw.disadvantages || '');
+
+    return {
+      id: reviewId,
+      rating,
+      text,
+      pros,
+      cons,
+      customerName: (
+        raw.author_name ||
+        raw.authorName ||
+        raw.user_name ||
+        raw.userName ||
+        raw.customer_name ||
+        raw.customerName ||
+        ''
+      ).toString().trim(),
+      sellerArticle: (
+        raw.offer_id ||
+        raw.offerId ||
+        raw.seller_sku ||
+        raw.sellerSku ||
+        raw.vendor_code ||
+        raw.vendorCode ||
+        ''
+      ).toString().trim(),
+      productTitle: (
+        raw.product_name ||
+        raw.productName ||
+        raw.offer_name ||
+        raw.offerName ||
+        ''
+      ).toString().trim(),
+      orderId: (
+        raw.order_id ||
+        raw.orderId ||
+        raw.order_number ||
+        raw.orderNumber ||
+        ''
+      ).toString().trim(),
+      createdAt: raw.created_at || raw.createdAt || raw.published_at || raw.publishedAt || new Date().toISOString(),
+    };
+  }
+
+  async fetchOzonReviews(cabinet) {
+    const headers = {
+      'Client-Id': cabinet.apiClientId,
+      'Api-Key': cabinet.apiKey,
+    };
+
+    const variants = [
+      { limit: 100, offset: 0 },
+      { page: 1, page_size: 100 },
+    ];
+
+    const all = [];
+    const seen = new Set();
+    for (const payload of variants) {
+      try {
+        const response = await axios.post(`${this.baseUrl}${this.reviewListPath}`, payload, { headers, timeout: 10000 });
+        const rows =
+          response.data?.result?.reviews ||
+          response.data?.result?.items ||
+          response.data?.reviews ||
+          response.data?.items ||
+          [];
+
+        for (const raw of (Array.isArray(rows) ? rows : [])) {
+          const normalized = this.normalizeOzonReview(raw);
+          if (!normalized || seen.has(normalized.id)) continue;
+          seen.add(normalized.id);
+          all.push(normalized);
+        }
+      } catch (error) {
+        logger.debug(`Ozon ${cabinet.name}: reviews fetch variant failed (${JSON.stringify(payload)}): ${error.response?.status || ''} ${error.message}`);
+      }
+    }
+
+    return all;
+  }
+
+  async syncReviews(cabinet) {
+    try {
+      if (!cabinet.apiClientId || !cabinet.apiKey) return;
+
+      const reviews = await this.fetchOzonReviews(cabinet);
+      if (!reviews.length) {
+        logger.info(`Ozon ${cabinet.name}: отзывы не найдены или API не вернул данные`);
+        return;
+      }
+
+      let attached = 0;
+      for (const review of reviews) {
+        const chat = await this.findChatForReview(cabinet, review);
+        if (!chat || !chat.externalChatId) continue;
+
+        const text = this.composeReviewMessage(review);
+        if (!text) continue;
+
+        const inserted = await this.processIncomingMessage(cabinet, {
+          externalChatId: chat.externalChatId,
+          customerName: review.customerName || chat.customerName || 'Покупатель',
+          text,
+          externalMsgId: `ozon-review-${review.id}`,
+          senderType: 'SYSTEM',
+          conversationType: 'CHAT',
+          createdAt: review.createdAt,
+        });
+        if (inserted) attached += 1;
+      }
+
+      logger.info(`Ozon ${cabinet.name}: синхронизировано отзывов ${reviews.length}, привязано к чатам ${attached}`);
+    } catch (error) {
+      logger.error(`Ozon ${cabinet.name} ошибка синхронизации отзывов: ${error.message} | status: ${error.response?.status} | response: ${JSON.stringify(error.response?.data)}`);
+    }
+  }
+
   async sendMessage(cabinet, externalChatId, text) {
     try {
       if (externalChatId.startsWith('ozon-q-')) {
@@ -2777,6 +3112,12 @@ const syncAllMarketplaces = async (io) => {
       logger.info(`Запуск синхронизации чатов: ${cabinet.marketplace.name} ${cabinet.name}`);
       await service.syncChats(cabinet, io);
       logger.info(`Завершена синхронизация чатов: ${cabinet.marketplace.name} ${cabinet.name}`);
+
+      if (typeof service.syncReviews === 'function') {
+        logger.info(`Запуск синхронизации отзывов: ${cabinet.marketplace.name} ${cabinet.name}`);
+        await service.syncReviews(cabinet, io);
+        logger.info(`Завершена синхронизация отзывов: ${cabinet.marketplace.name} ${cabinet.name}`);
+      }
 
       if (cabinet.marketplace.slug !== 'ozon' && typeof service.syncQuestions === 'function') {
         logger.info(`Запуск синхронизации вопросов: ${cabinet.marketplace.name} ${cabinet.name}`);
