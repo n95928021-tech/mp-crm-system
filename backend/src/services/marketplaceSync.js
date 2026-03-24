@@ -2873,6 +2873,66 @@ class YandexMarketSyncService extends MarketplaceSyncService {
     this.baseUrl = config.marketplaces.yandex.baseUrl;
   }
 
+  getYandexAuthHeaderCandidates(apiToken) {
+    const token = String(apiToken || '').trim();
+    const candidates = [];
+
+    if (token.startsWith('ACMA:')) {
+      candidates.push({ 'Api-Key': token });
+    }
+
+    candidates.push({ Authorization: `OAuth ${token}` });
+    candidates.push({ Authorization: `Bearer ${token}` });
+
+    if (!token.startsWith('ACMA:')) {
+      candidates.push({ 'Api-Key': token });
+    }
+
+    const seen = new Set();
+    return candidates.filter((headers) => {
+      const key = JSON.stringify(headers);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  getYandexAuthLabel(headers) {
+    if (headers['Api-Key']) return 'Api-Key';
+    const auth = String(headers.Authorization || '');
+    if (auth.startsWith('OAuth ')) return 'OAuth';
+    if (auth.startsWith('Bearer ')) return 'Bearer';
+    return 'unknown';
+  }
+
+  async yandexRequest(config, apiToken) {
+    const authVariants = this.getYandexAuthHeaderCandidates(apiToken);
+    let lastError = null;
+
+    for (const authHeaders of authVariants) {
+      const authLabel = this.getYandexAuthLabel(authHeaders);
+      try {
+        const response = await axios({
+          ...config,
+          headers: {
+            ...(config.headers || {}),
+            ...authHeaders,
+          },
+        });
+        logger.debug(`ЯМ auth success via ${authLabel}`);
+        return response;
+      } catch (error) {
+        lastError = error;
+        const status = error?.response?.status;
+        logger.debug(`ЯМ auth failed via ${authLabel}: status ${status || 'n/a'}`);
+        if (status === 401 || status === 403) continue;
+        throw error;
+      }
+    }
+
+    throw lastError;
+  }
+
   resolveYandexCredentials(cabinet) {
     const apiToken = cabinet?.apiToken || config.marketplaces.yandex.token || '';
     const businessId = (
@@ -2898,30 +2958,28 @@ class YandexMarketSyncService extends MarketplaceSyncService {
 
       // Яндекс Маркет API: Получение чатов
       // Документация: https://yandex.ru/dev/market/partner-api/
-      const response = await axios.post(
-        `${this.baseUrl}/businesses/${businessId}/chats`,
-        { page: 1, pageSize: 100 },
+      const response = await this.yandexRequest(
         {
-          headers: {
-            Authorization: `Bearer ${apiToken}`,
-          },
+          method: 'post',
+          url: `${this.baseUrl}/businesses/${businessId}/chats`,
+          data: { page: 1, pageSize: 100 },
           timeout: 10000,
-        }
+        },
+        apiToken
       );
 
       const chats = response.data?.result?.chats || [];
 
       for (const chatData of chats) {
         // Получаем историю
-        const historyResp = await axios.post(
-          `${this.baseUrl}/businesses/${businessId}/chats/history`,
-          { chatId: chatData.chatId, messageIdFrom: 0 },
+        const historyResp = await this.yandexRequest(
           {
-            headers: {
-              Authorization: `Bearer ${apiToken}`,
-            },
+            method: 'post',
+            url: `${this.baseUrl}/businesses/${businessId}/chats/history`,
+            data: { chatId: chatData.chatId, messageIdFrom: 0 },
             timeout: 10000,
-          }
+          },
+          apiToken
         );
 
         const messages = historyResp.data?.result?.messages || [];
@@ -3008,15 +3066,14 @@ class YandexMarketSyncService extends MarketplaceSyncService {
     }
 
     const chatId = externalChatId.replace('ym-', '');
-    const response = await axios.post(
-      `${this.baseUrl}/businesses/${businessId}/chats`,
-      { page: 1, pageSize: 100 },
+    const response = await this.yandexRequest(
       {
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-        },
+        method: 'post',
+        url: `${this.baseUrl}/businesses/${businessId}/chats`,
+        data: { page: 1, pageSize: 100 },
         timeout: 10000,
-      }
+      },
+      apiToken
     );
 
     const chats = response.data?.result?.chats || [];
@@ -3041,15 +3098,14 @@ class YandexMarketSyncService extends MarketplaceSyncService {
         return false;
       }
       const chatId = externalChatId.replace('ym-', '');
-      await axios.post(
-        `${this.baseUrl}/businesses/${businessId}/chats/message`,
-        { chatId, message: text },
+      await this.yandexRequest(
         {
-          headers: {
-            Authorization: `Bearer ${apiToken}`,
-          },
+          method: 'post',
+          url: `${this.baseUrl}/businesses/${businessId}/chats/message`,
+          data: { chatId, message: text },
           timeout: 10000,
-        }
+        },
+        apiToken
       );
       return true;
     } catch (error) {
