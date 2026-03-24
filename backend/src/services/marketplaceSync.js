@@ -2979,9 +2979,8 @@ class YandexMarketSyncService extends MarketplaceSyncService {
           const historyResp = await this.yandexRequest(
             {
               method: 'post',
-              url: `${this.baseUrl}/v2/businesses/${businessId}/chats/history`,
-              params: { chatId, limit: 100 },
-              data: { messageIdFrom: 1 },
+              url: `${this.baseUrl}/v2/businesses/${businessId}/chats/history?chatId=${encodeURIComponent(chatId)}`,
+              data: { messageIdFrom: 1, limit: 100 },
               timeout: 10000,
             },
             apiToken
@@ -3114,8 +3113,7 @@ class YandexMarketSyncService extends MarketplaceSyncService {
       await this.yandexRequest(
         {
           method: 'post',
-          url: `${this.baseUrl}/v2/businesses/${businessId}/chats/message`,
-          params: { chatId: Number(chatId) },
+          url: `${this.baseUrl}/v2/businesses/${businessId}/chats/message?chatId=${encodeURIComponent(Number(chatId))}`,
           data: { message: text },
           timeout: 10000,
         },
