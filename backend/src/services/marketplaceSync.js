@@ -242,6 +242,7 @@ class MarketplaceSyncService {
     const {
       externalChatId,
       customerName,
+      customerExternalId,
       text,
       messageType = 'TEXT',
       mediaUrl,
@@ -266,13 +267,20 @@ class MarketplaceSyncService {
           conversationType,
           externalChatId,
           customerName: customerName || 'Покупатель',
+          customerExternalId: customerExternalId || null,
           status: 'OPEN',
         },
       });
-    } else if (customerName && chat.customerName !== customerName) {
+    } else if (
+      (customerName && chat.customerName !== customerName) ||
+      (customerExternalId && chat.customerExternalId !== customerExternalId)
+    ) {
+      const updateData = {};
+      if (customerName && chat.customerName !== customerName) updateData.customerName = customerName;
+      if (customerExternalId && chat.customerExternalId !== customerExternalId) updateData.customerExternalId = customerExternalId;
       chat = await prisma.chat.update({
         where: { id: chat.id },
-        data: { customerName },
+        data: updateData,
       });
     }
 
@@ -2933,6 +2941,24 @@ class YandexMarketSyncService extends MarketplaceSyncService {
     throw lastError;
   }
 
+  extractYandexMedia(message) {
+    const payload = Array.isArray(message?.payload) ? message.payload : [];
+    const first = payload.find((item) => item && typeof item.url === 'string' && item.url.trim());
+    if (!first) return null;
+
+    const mediaUrl = first.url.trim();
+    const fileName = String(first.name || '').toLowerCase();
+    const isImage = /\.(png|jpe?g|gif|webp|bmp|heic|heif)(\?|$)/i.test(mediaUrl) ||
+      /\.(png|jpe?g|gif|webp|bmp|heic|heif)$/i.test(fileName);
+
+    return {
+      messageType: isImage ? 'IMAGE' : 'FILE',
+      mediaUrl,
+      thumbnailUrl: isImage ? mediaUrl : null,
+      mediaMimeType: null,
+    };
+  }
+
   resolveYandexCredentials(cabinet) {
     const apiToken = cabinet?.apiToken || config.marketplaces.yandex.token || '';
     const businessId = (
@@ -2989,14 +3015,29 @@ class YandexMarketSyncService extends MarketplaceSyncService {
           const messages = historyResp.data?.result?.messages || [];
           for (const msg of messages) {
             if (msg.sender === 'CUSTOMER') {
+              const media = this.extractYandexMedia(msg);
+              const cleanText = String(msg.message || '').trim();
+              const normalizedText =
+                cleanText ||
+                (media?.messageType === 'IMAGE' ? '📷 Фотография' :
+                  media?.messageType === 'FILE' ? '📎 Файл' : '');
+
               await this.processIncomingMessage(cabinet, {
                 externalChatId: `ym-${chatId}`,
                 customerName:
                   chatData?.context?.customer?.name ||
                   chatData?.buyer?.name ||
                   'Покупатель ЯМ',
-                text: msg.message || '',
+                customerExternalId:
+                  chatData?.context?.customer?.publicId ||
+                  null,
+                text: normalizedText,
+                messageType: media?.messageType || 'TEXT',
+                mediaUrl: media?.mediaUrl || null,
+                thumbnailUrl: media?.thumbnailUrl || null,
+                mediaMimeType: media?.mediaMimeType || null,
                 externalMsgId: `ym-msg-${msg.messageId}`,
+                createdAt: msg.createdAt,
               }, io);
             }
           }
