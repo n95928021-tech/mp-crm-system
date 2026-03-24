@@ -3062,31 +3062,6 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                   {manualSyncRunning ? "↻ Синхронизация..." : "↻ Синхронизировать"}
                 </button>
                 <button
-                  onClick={async () => {
-                    if (!apiUrl || reviewSyncRunning) return;
-                    try {
-                      setReviewSyncRunning(true);
-                      await fetch(`${apiUrl}/sync/reviews/manual`, { method: "POST", headers: getHeaders() });
-                      await loadChats();
-                      await loadQuestions();
-                    } catch (e) {
-                      console.error("Ошибка синхронизации отзывов:", e);
-                    } finally {
-                      setReviewSyncRunning(false);
-                    }
-                  }}
-                  style={{
-                    background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.15)",
-                    borderRadius: 6, padding: "4px 10px", color: "#60a5fa", cursor: reviewSyncRunning ? "default" : "pointer",
-                    fontSize: 11, fontFamily: "inherit", marginRight: 4,
-                    opacity: reviewSyncRunning ? 0.6 : 1,
-                  }}
-                  title="Синхронизировать отзывы WB/Ozon"
-                  disabled={reviewSyncRunning}
-                >
-                  {reviewSyncRunning ? "📝 Отзывы..." : "📝 Отзывы"}
-                </button>
-                <button
                   onClick={() => isQuestionsView ? loadQuestions() : loadChats()}
                   style={{
                     background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)",
@@ -3288,6 +3263,35 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     >
                       {Icons.eye()} Перейти на товар
                     </button>
+                    {user?.role === "ADMIN" && (
+                      <button
+                        onClick={async () => {
+                          if (!apiUrl || reviewSyncRunning) return;
+                          try {
+                            setReviewSyncRunning(true);
+                            await fetch(`${apiUrl}/sync/reviews/manual`, { method: "POST", headers: getHeaders() });
+                            await loadChats();
+                            await loadQuestions();
+                          } catch (e) {
+                            console.error("Ошибка синхронизации отзывов:", e);
+                          } finally {
+                            setReviewSyncRunning(false);
+                          }
+                        }}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 5,
+                          padding: "6px 12px", borderRadius: 8,
+                          background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.25)",
+                          color: "#60a5fa", fontSize: 11, fontWeight: 600,
+                          cursor: reviewSyncRunning ? "default" : "pointer", fontFamily: "inherit",
+                          opacity: reviewSyncRunning ? 0.6 : 1,
+                        }}
+                        title="Синхронизировать отзывы WB/Ozon"
+                        disabled={reviewSyncRunning}
+                      >
+                        {reviewSyncRunning ? "📝 Отзывы..." : "📝 Отзывы"}
+                      </button>
+                    )}
                     <select
                       value={currentConversation.status || "OPEN"}
                       onChange={async (e) => {
