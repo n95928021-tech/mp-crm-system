@@ -2875,17 +2875,23 @@ class YandexMarketSyncService extends MarketplaceSyncService {
 
   resolveYandexCredentials(cabinet) {
     const apiToken = cabinet?.apiToken || config.marketplaces.yandex.token || '';
-    const campaignId = cabinet?.campaignId || config.marketplaces.yandex.campaignId || '';
+    const businessId = (
+      cabinet?.apiClientId ||
+      cabinet?.campaignId ||
+      config.marketplaces.yandex.businessId ||
+      config.marketplaces.yandex.campaignId ||
+      ''
+    );
     return {
       apiToken: String(apiToken || '').trim(),
-      campaignId: String(campaignId || '').trim(),
+      businessId: String(businessId || '').trim(),
     };
   }
 
   async syncChats(cabinet, io) {
     try {
-      const { apiToken, campaignId } = this.resolveYandexCredentials(cabinet);
-      if (!apiToken || !campaignId) {
+      const { apiToken, businessId } = this.resolveYandexCredentials(cabinet);
+      if (!apiToken || !businessId) {
         logger.warn(`ЯМ кабинет ${cabinet.name}: API не настроен`);
         return;
       }
@@ -2893,7 +2899,7 @@ class YandexMarketSyncService extends MarketplaceSyncService {
       // Яндекс Маркет API: Получение чатов
       // Документация: https://yandex.ru/dev/market/partner-api/
       const response = await axios.post(
-        `${this.baseUrl}/businesses/${campaignId}/chats`,
+        `${this.baseUrl}/businesses/${businessId}/chats`,
         { page: 1, pageSize: 100 },
         {
           headers: {
@@ -2908,7 +2914,7 @@ class YandexMarketSyncService extends MarketplaceSyncService {
       for (const chatData of chats) {
         // Получаем историю
         const historyResp = await axios.post(
-          `${this.baseUrl}/businesses/${campaignId}/chats/history`,
+          `${this.baseUrl}/businesses/${businessId}/chats/history`,
           { chatId: chatData.chatId, messageIdFrom: 0 },
           {
             headers: {
@@ -2996,14 +3002,14 @@ class YandexMarketSyncService extends MarketplaceSyncService {
   }
 
   async getChatMetadata(cabinet, externalChatId) {
-    const { apiToken, campaignId } = this.resolveYandexCredentials(cabinet);
-    if (!apiToken || !campaignId || !externalChatId?.startsWith('ym-')) {
+    const { apiToken, businessId } = this.resolveYandexCredentials(cabinet);
+    if (!apiToken || !businessId || !externalChatId?.startsWith('ym-')) {
       return null;
     }
 
     const chatId = externalChatId.replace('ym-', '');
     const response = await axios.post(
-      `${this.baseUrl}/businesses/${campaignId}/chats`,
+      `${this.baseUrl}/businesses/${businessId}/chats`,
       { page: 1, pageSize: 100 },
       {
         headers: {
@@ -3029,14 +3035,14 @@ class YandexMarketSyncService extends MarketplaceSyncService {
 
   async sendMessage(cabinet, externalChatId, text) {
     try {
-      const { apiToken, campaignId } = this.resolveYandexCredentials(cabinet);
-      if (!apiToken || !campaignId) {
+      const { apiToken, businessId } = this.resolveYandexCredentials(cabinet);
+      if (!apiToken || !businessId) {
         logger.warn(`ЯМ кабинет ${cabinet?.name || ''}: API не настроен для отправки сообщения`);
         return false;
       }
       const chatId = externalChatId.replace('ym-', '');
       await axios.post(
-        `${this.baseUrl}/businesses/${campaignId}/chats/message`,
+        `${this.baseUrl}/businesses/${businessId}/chats/message`,
         { chatId, message: text },
         {
           headers: {

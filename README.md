@@ -251,6 +251,7 @@ npm run dev
 - `WB_CABINET_1_TOKEN` ... `WB_CABINET_5_TOKEN`
 - `OZON_CABINET_1_CLIENT_ID`, `OZON_CABINET_1_API_KEY` и далее
 - `YANDEX_CABINET_1_TOKEN`
+- `YANDEX_CABINET_1_BUSINESS_ID` (приоритетно для API `/businesses/{id}`)
 - `YANDEX_CABINET_1_CAMPAIGN_ID`
 
 ## Статус проекта

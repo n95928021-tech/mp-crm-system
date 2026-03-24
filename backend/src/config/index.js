@@ -60,6 +60,7 @@ module.exports = {
     yandex: {
       baseUrl: process.env.YANDEX_API_BASE_URL || 'https://api.partner.market.yandex.ru',
       token: process.env.YANDEX_CABINET_1_TOKEN,
+      businessId: process.env.YANDEX_CABINET_1_BUSINESS_ID || process.env.YANDEX_CABINET_1_CAMPAIGN_ID,
       campaignId: process.env.YANDEX_CABINET_1_CAMPAIGN_ID,
     },
   },
