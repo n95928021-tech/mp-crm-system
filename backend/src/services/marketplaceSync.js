@@ -2971,27 +2971,40 @@ class YandexMarketSyncService extends MarketplaceSyncService {
       const chats = response.data?.result?.chats || [];
 
       for (const chatData of chats) {
-        // Получаем историю
-        const historyResp = await this.yandexRequest(
-          {
-            method: 'post',
-            url: `${this.baseUrl}/businesses/${businessId}/chats/history`,
-            data: { chatId: chatData.chatId, messageIdFrom: 0 },
-            timeout: 10000,
-          },
-          apiToken
-        );
+        const chatId = Number(chatData?.chatId || chatData?.id || 0);
+        if (!chatId) continue;
 
-        const messages = historyResp.data?.result?.messages || [];
-        for (const msg of messages) {
-          if (msg.sender === 'BUYER') {
-            await this.processIncomingMessage(cabinet, {
-              externalChatId: `ym-${chatData.chatId}`,
-              customerName: chatData.buyer?.name || 'Покупатель ЯМ',
-              text: msg.message || '',
-              externalMsgId: `ym-msg-${msg.messageId}`,
-            }, io);
+        try {
+          // В API ЯМ chatId передаётся query-параметром.
+          const historyResp = await this.yandexRequest(
+            {
+              method: 'post',
+              url: `${this.baseUrl}/v2/businesses/${businessId}/chats/history`,
+              params: { chatId, limit: 100 },
+              data: { messageIdFrom: 1 },
+              timeout: 10000,
+            },
+            apiToken
+          );
+
+          const messages = historyResp.data?.result?.messages || [];
+          for (const msg of messages) {
+            if (msg.sender === 'CUSTOMER') {
+              await this.processIncomingMessage(cabinet, {
+                externalChatId: `ym-${chatId}`,
+                customerName:
+                  chatData?.context?.customer?.name ||
+                  chatData?.buyer?.name ||
+                  'Покупатель ЯМ',
+                text: msg.message || '',
+                externalMsgId: `ym-msg-${msg.messageId}`,
+              }, io);
+            }
           }
+        } catch (historyError) {
+          logger.warn(
+            `ЯМ кабинет ${cabinet.name}: пропуск истории чата ${chatId} (${historyError.response?.status || 'n/a'})`
+          );
         }
       }
 
@@ -3101,8 +3114,9 @@ class YandexMarketSyncService extends MarketplaceSyncService {
       await this.yandexRequest(
         {
           method: 'post',
-          url: `${this.baseUrl}/businesses/${businessId}/chats/message`,
-          data: { chatId, message: text },
+          url: `${this.baseUrl}/v2/businesses/${businessId}/chats/message`,
+          params: { chatId: Number(chatId) },
+          data: { message: text },
           timeout: 10000,
         },
         apiToken
