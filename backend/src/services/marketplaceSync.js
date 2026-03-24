@@ -2959,6 +2959,40 @@ class YandexMarketSyncService extends MarketplaceSyncService {
     };
   }
 
+  getYandexMessageTimestamp(msg, chatData) {
+    const candidates = [
+      msg?.createdAt,
+      msg?.creationDate,
+      msg?.timestamp,
+      msg?.time,
+      msg?.updatedAt,
+      msg?.updateDate,
+      chatData?.updatedAt,
+      chatData?.createdAt,
+    ];
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const parsed = new Date(candidate);
+      if (!Number.isNaN(parsed.getTime())) return parsed;
+    }
+
+    return new Date();
+  }
+
+  mapYandexSenderType(sender) {
+    switch (String(sender || '').toUpperCase()) {
+      case 'CUSTOMER':
+        return 'CUSTOMER';
+      case 'PARTNER':
+        return 'AGENT';
+      case 'MARKET':
+        return 'SYSTEM';
+      default:
+        return 'SYSTEM';
+    }
+  }
+
   resolveYandexCredentials(cabinet) {
     const apiToken = cabinet?.apiToken || config.marketplaces.yandex.token || '';
     const businessId = (
@@ -3013,33 +3047,79 @@ class YandexMarketSyncService extends MarketplaceSyncService {
           );
 
           const messages = historyResp.data?.result?.messages || [];
-          for (const msg of messages) {
-            if (msg.sender === 'CUSTOMER') {
-              const media = this.extractYandexMedia(msg);
-              const cleanText = String(msg.message || '').trim();
-              const normalizedText =
-                cleanText ||
-                (media?.messageType === 'IMAGE' ? '📷 Фотография' :
-                  media?.messageType === 'FILE' ? '📎 Файл' : '');
+          const normalizedMessages = [];
 
-              await this.processIncomingMessage(cabinet, {
+          for (const msg of messages) {
+            const media = this.extractYandexMedia(msg);
+            const cleanText = String(msg.message || '').trim();
+            const normalizedText =
+              cleanText ||
+              (media?.messageType === 'IMAGE' ? '📷 Фотография' :
+                media?.messageType === 'FILE' ? '📎 Файл' : '');
+            const createdAt = this.getYandexMessageTimestamp(msg, chatData);
+            const senderType = this.mapYandexSenderType(msg?.sender);
+            const externalMsgIdRaw = msg?.messageId || msg?.id;
+            const externalMsgId = externalMsgIdRaw ? `ym-msg-${externalMsgIdRaw}` : null;
+
+            if (!normalizedText && !media?.mediaUrl) continue;
+
+            normalizedMessages.push({
+              text: normalizedText,
+              messageType: media?.messageType || 'TEXT',
+              mediaUrl: media?.mediaUrl || null,
+              thumbnailUrl: media?.thumbnailUrl || null,
+              mediaMimeType: media?.mediaMimeType || null,
+              externalMsgId,
+              createdAt,
+              senderType,
+            });
+
+            await this.processIncomingMessage(cabinet, {
+              externalChatId: `ym-${chatId}`,
+              customerName:
+                chatData?.context?.customer?.name ||
+                chatData?.buyer?.name ||
+                'Покупатель ЯМ',
+              customerExternalId:
+                chatData?.context?.customer?.publicId ||
+                null,
+              text: normalizedText,
+              messageType: media?.messageType || 'TEXT',
+              mediaUrl: media?.mediaUrl || null,
+              thumbnailUrl: media?.thumbnailUrl || null,
+              mediaMimeType: media?.mediaMimeType || null,
+              externalMsgId,
+              createdAt,
+              senderType,
+            }, io);
+          }
+
+          if (normalizedMessages.length) {
+            normalizedMessages.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+            const last = normalizedMessages[normalizedMessages.length - 1];
+            await prisma.chat.updateMany({
+              where: {
+                cabinetId: cabinet.id,
                 externalChatId: `ym-${chatId}`,
-                customerName:
-                  chatData?.context?.customer?.name ||
-                  chatData?.buyer?.name ||
-                  'Покупатель ЯМ',
-                customerExternalId:
-                  chatData?.context?.customer?.publicId ||
-                  null,
-                text: normalizedText,
-                messageType: media?.messageType || 'TEXT',
-                mediaUrl: media?.mediaUrl || null,
-                thumbnailUrl: media?.thumbnailUrl || null,
-                mediaMimeType: media?.mediaMimeType || null,
-                externalMsgId: `ym-msg-${msg.messageId}`,
-                createdAt: msg.createdAt,
-              }, io);
-            }
+                conversationType: 'CHAT',
+              },
+              data: {
+                lastMessageAt: last.createdAt,
+                lastMessageText: last.text || null,
+              },
+            });
+          } else {
+            const fallbackLastMessageAt = this.getYandexMessageTimestamp({}, chatData);
+            await prisma.chat.updateMany({
+              where: {
+                cabinetId: cabinet.id,
+                externalChatId: `ym-${chatId}`,
+                conversationType: 'CHAT',
+              },
+              data: {
+                lastMessageAt: fallbackLastMessageAt,
+              },
+            });
           }
         } catch (historyError) {
           logger.warn(
