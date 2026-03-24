@@ -469,10 +469,11 @@ class WildberriesSyncService extends MarketplaceSyncService {
       const savedChats = new Map();
 
       for (const chatData of normalizedChats) {
-        const chatId = this.getWbChatId(chatData);
-        if (!chatId) continue;
+        const chatIdRaw = this.getWbChatId(chatData);
+        const chatId = this.normalizeWbChatId(chatIdRaw);
+        if (!chatIdRaw || !chatId) continue;
 
-        const externalChatId = `wb-chat-${chatId}`;
+        const externalChatId = `wb-chat-${chatIdRaw}`;
         const customerName = this.getWbChatCustomerName(chatData);
         const replySign = this.getWbChatReplySign(chatData);
         const unreadCountInfo = this.getWbChatUnreadCount(chatData);
@@ -521,6 +522,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
         }
         savedChats.set(chatId, {
           chatRecord,
+          rawChatId: chatIdRaw,
           externalChatId,
           customerName,
           unreadCountInfo,
@@ -541,7 +543,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
       const recentEventsByChatId = new Map();
       for (const event of recentEvents) {
-        const chatId = this.getWbEventChatId(event);
+        const chatId = this.normalizeWbChatId(this.getWbEventChatId(event));
         if (!chatId) continue;
         if (!recentEventsByChatId.has(chatId)) recentEventsByChatId.set(chatId, []);
         recentEventsByChatId.get(chatId).push(event);
@@ -554,18 +556,22 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
         let meta = savedChats.get(chatId);
         if (!meta) {
-          const externalChatId = `wb-chat-${chatId}`;
+          const externalChatIdCandidates = [
+            `wb-chat-${chatId}`,
+            `wb-chat-1:${chatId}`,
+          ];
           const existingChat = await prisma.chat.findFirst({
             where: {
               cabinetId: cabinet.id,
-              externalChatId,
+              externalChatId: { in: externalChatIdCandidates },
               conversationType: 'CHAT',
             },
           });
 
           meta = {
             chatRecord: existingChat,
-            externalChatId,
+            rawChatId: existingChat?.externalChatId?.replace(/^wb-chat-/, '') || chatId,
+            externalChatId: existingChat?.externalChatId || `wb-chat-${chatId}`,
             customerName: this.getWbEventCustomerName(chatEvents[chatEvents.length - 1]) || 'Покупатель WB',
             unreadCountInfo: { present: false, value: 0 },
             listLastMessageAt: null,
@@ -640,12 +646,15 @@ class WildberriesSyncService extends MarketplaceSyncService {
           return bTime - aTime;
         })
         .slice(0, 30)
-        .map((chat) => this.getWbChatId(chat))
+        .map((chat) => this.normalizeWbChatId(this.getWbChatId(chat)))
         .filter(Boolean);
 
       const events = await this.fetchWbEvents(cabinet, {
         debugLabel: normalizedChats[0] ? cabinet.name : null,
         targetChatIds: prioritizedChatIds,
+        minCreatedAtMs: Date.now() - (36 * 60 * 60 * 1000),
+        maxPages: 180,
+        stopAfterInitialQuietPages: 0,
       });
       if (events[0]) {
         logger.debug(`WB ${cabinet.name}: sample event payload ${JSON.stringify(events[0]).slice(0, 2500)}`);
@@ -653,7 +662,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
       const eventsByChatId = new Map();
       for (const event of events) {
-        const chatId = this.getWbEventChatId(event);
+        const chatId = this.normalizeWbChatId(this.getWbEventChatId(event));
         if (!chatId || !savedChats.has(chatId)) continue;
         if (!eventsByChatId.has(chatId)) eventsByChatId.set(chatId, []);
         eventsByChatId.get(chatId).push(event);
@@ -730,15 +739,15 @@ class WildberriesSyncService extends MarketplaceSyncService {
     try {
       const events = await this.fetchWbEvents(cabinet, {
         debugLabel: `${cabinet.name}:${targetChatId}:manual`,
-        targetChatIds: [targetChatId],
+        targetChatIds: [this.normalizeWbChatId(targetChatId)],
         maxPages: 200,
         pageDelayMs: 450,
-        stopAfterInitialQuietPages: 6,
+        stopAfterInitialQuietPages: 0,
         stopAfterTargetQuietPages: 3,
       });
 
       const filteredEvents = events
-        .filter((event) => this.getWbEventChatId(event) === targetChatId)
+        .filter((event) => this.normalizeWbChatId(this.getWbEventChatId(event)) === this.normalizeWbChatId(targetChatId))
         .sort((a, b) => this.parseMessageDate(this.getWbEventCreatedAt(a)) - this.parseMessageDate(this.getWbEventCreatedAt(b)));
 
       let loaded = 0;
@@ -1222,6 +1231,12 @@ class WildberriesSyncService extends MarketplaceSyncService {
     return String(chatData?.chatID || chatData?.chatId || chatData?.id || '');
   }
 
+  normalizeWbChatId(chatId) {
+    const raw = String(chatId || '').trim();
+    if (!raw) return '';
+    return raw.startsWith('1:') ? raw.slice(2) : raw;
+  }
+
   getWbChatReplySign(chatData) {
     return chatData?.replySign || chatData?.reply_sign || chatData?.replysign || null;
   }
@@ -1417,7 +1432,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
     const headers = { Authorization: cabinet.apiToken };
     const collected = [];
     const seen = new Set();
-    let next = null;
+    let next = options?.minCreatedAtMs ? Number(options.minCreatedAtMs) : null;
     let page = 0;
     const {
       debugLabel = null,
@@ -1428,7 +1443,9 @@ class WildberriesSyncService extends MarketplaceSyncService {
       stopAfterTargetQuietPages = 0,
       minCreatedAtMs = null,
     } = options;
-    const targetSet = Array.isArray(targetChatIds) && targetChatIds.length ? new Set(targetChatIds.map(String)) : null;
+    const targetSet = Array.isArray(targetChatIds) && targetChatIds.length
+      ? new Set(targetChatIds.map((id) => this.normalizeWbChatId(id)).filter(Boolean))
+      : null;
     let hasMatchedTarget = false;
     let targetQuietPages = 0;
 
@@ -1466,7 +1483,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
       const nextCursor = payload?.next || payload?.nextCursor || payload?.cursor?.next || null;
       const totalEvents = payload?.totalEvents;
       const scopedEvents = targetSet
-        ? normalizedEvents.filter((event) => targetSet.has(this.getWbEventChatId(event)))
+        ? normalizedEvents.filter((event) => targetSet.has(this.normalizeWbChatId(this.getWbEventChatId(event))))
         : normalizedEvents;
 
       if (targetSet) {
@@ -1507,14 +1524,14 @@ class WildberriesSyncService extends MarketplaceSyncService {
         if (totalEvents === 0 || !nextCursor || added === 0) break;
 
         if (minCreatedAtMs) {
-          let oldestMs = Number.POSITIVE_INFINITY;
+          let newestMs = Number.NEGATIVE_INFINITY;
           for (const event of normalizedEvents) {
             const ms = this.parseMessageDate(this.getWbEventCreatedAt(event)).getTime();
-            if (Number.isFinite(ms) && ms < oldestMs) oldestMs = ms;
+            if (Number.isFinite(ms) && ms > newestMs) newestMs = ms;
           }
-          if (Number.isFinite(oldestMs) && oldestMs < minCreatedAtMs) {
+          if (Number.isFinite(newestMs) && newestMs < minCreatedAtMs) {
             if (debugLabel) {
-              logger.debug(`WB events ${debugLabel}: stop by age boundary ${new Date(oldestMs).toISOString()} < ${new Date(minCreatedAtMs).toISOString()}`);
+              logger.debug(`WB events ${debugLabel}: stop by age boundary ${new Date(newestMs).toISOString()} < ${new Date(minCreatedAtMs).toISOString()}`);
             }
             break;
           }

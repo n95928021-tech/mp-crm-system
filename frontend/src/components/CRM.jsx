@@ -1394,6 +1394,14 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const sellerArticle = currentConversation?.sellerArticle || "";
   const productImage = currentConversation?.productImage || "";
   const productUrl = currentConversation?.productUrl || "";
+  const hasReviewInCurrentConversation = useMemo(() => {
+    if (isQuestionsView || !currentConversation) return false;
+    return visibleMessages.some((msg) => {
+      const text = String(msg?.text || "").toLowerCase();
+      const isCustomerMessage = msg?.from === "customer";
+      return isCustomerMessage && (text.includes("отзыв покупателя") || text.includes("📝 отзыв"));
+    });
+  }, [currentConversation, isQuestionsView, visibleMessages]);
   const visibleConversations = isQuestionsView ? filteredQuestions : filteredChats;
   const conversationsLoading = isQuestionsView ? questionsLoading : chatsLoading;
   const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
@@ -3263,10 +3271,10 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     >
                       {Icons.eye()} Перейти на товар
                     </button>
-                    {user?.role === "ADMIN" && (
+                    {!isQuestionsView && user?.role === "ADMIN" && (
                       <button
                         onClick={async () => {
-                          if (!apiUrl || reviewSyncRunning) return;
+                          if (!apiUrl || reviewSyncRunning || !hasReviewInCurrentConversation) return;
                           try {
                             setReviewSyncRunning(true);
                             await fetch(`${apiUrl}/sync/reviews/manual`, { method: "POST", headers: getHeaders() });
@@ -3280,16 +3288,21 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                         }}
                         style={{
                           display: "flex", alignItems: "center", gap: 5,
-                          padding: "6px 12px", borderRadius: 8,
-                          background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.25)",
-                          color: "#60a5fa", fontSize: 11, fontWeight: 600,
-                          cursor: reviewSyncRunning ? "default" : "pointer", fontFamily: "inherit",
+                          padding: "6px 12px",
+                          borderRadius: 8,
+                          background: hasReviewInCurrentConversation ? "rgba(59,130,246,0.12)" : "rgba(148,163,184,0.08)",
+                          border: hasReviewInCurrentConversation ? "1px solid rgba(59,130,246,0.25)" : "1px solid rgba(148,163,184,0.18)",
+                          color: hasReviewInCurrentConversation ? "#60a5fa" : "#64748b",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          cursor: reviewSyncRunning || !hasReviewInCurrentConversation ? "not-allowed" : "pointer",
+                          fontFamily: "inherit",
                           opacity: reviewSyncRunning ? 0.6 : 1,
                         }}
-                        title="Синхронизировать отзывы WB/Ozon"
-                        disabled={reviewSyncRunning}
+                        title={hasReviewInCurrentConversation ? "Синхронизировать отзывы WB/Ozon" : "В этом чате нет отзыва текущего покупателя"}
+                        disabled={reviewSyncRunning || !hasReviewInCurrentConversation}
                       >
-                        {reviewSyncRunning ? "📝 Отзывы..." : "📝 Отзывы"}
+                        {!hasReviewInCurrentConversation ? "📝 Отзывов нет" : (reviewSyncRunning ? "📝 Отзывы..." : "📝 Отзывы")}
                       </button>
                     )}
                     <select
