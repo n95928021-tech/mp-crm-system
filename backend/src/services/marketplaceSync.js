@@ -1991,6 +1991,86 @@ class OzonSyncService extends MarketplaceSyncService {
     );
   }
 
+  getOzonQuestionState(item, hasSellerAnswer = false) {
+    const rawStatus = `${item?.status || item?.question_status || item?.questionStatus || ''}`.trim().toUpperCase();
+
+    if (rawStatus === 'NEW') {
+      return {
+        unreadCount: 1,
+        status: 'OPEN',
+      };
+    }
+
+    if (rawStatus === 'VIEWED') {
+      return {
+        unreadCount: 0,
+        status: 'PENDING',
+      };
+    }
+
+    if (rawStatus === 'PROCESSED' || rawStatus === 'ANSWERED' || rawStatus === 'CLOSED') {
+      return {
+        unreadCount: 0,
+        status: 'RESOLVED',
+      };
+    }
+
+    return hasSellerAnswer
+      ? {
+          unreadCount: 0,
+          status: 'RESOLVED',
+        }
+      : {
+          unreadCount: 1,
+          status: 'OPEN',
+        };
+  }
+
+  async reconcileStaleOzonQuestionStates(cabinet, currentQuestionIds = []) {
+    const activeIds = new Set((currentQuestionIds || []).filter(Boolean).map((id) => `ozon-q-${id}`));
+    const staleQuestions = await prisma.chat.findMany({
+      where: {
+        cabinetId: cabinet.id,
+        conversationType: 'QUESTION',
+        unreadCount: {
+          gt: 0,
+        },
+      },
+      select: {
+        id: true,
+        externalChatId: true,
+      },
+    });
+
+    for (const staleQuestion of staleQuestions) {
+      if (!staleQuestion.externalChatId?.startsWith('ozon-q-')) continue;
+      if (activeIds.has(staleQuestion.externalChatId)) continue;
+
+      const questionId = staleQuestion.externalChatId.replace('ozon-q-', '');
+
+      try {
+        const { info, answers } = await this.fetchOzonQuestionDetails(cabinet, questionId);
+        if (!info) continue;
+
+        let hasSellerAnswer = false;
+        for (const answer of answers) {
+          const senderType = this.normalizeOzonAnswerSenderType(answer);
+          if (senderType === 'MANAGER') {
+            hasSellerAnswer = true;
+            break;
+          }
+        }
+
+        await prisma.chat.update({
+          where: { id: staleQuestion.id },
+          data: this.getOzonQuestionState(info, hasSellerAnswer),
+        });
+      } catch (error) {
+        logger.warn(`Ozon ${cabinet.name}: не удалось пересинхронизировать старый вопрос ${questionId}: ${error.response?.status || ''} ${error.message}`);
+      }
+    }
+  }
+
   normalizeOzonAnswerSenderType(answer) {
     const sender = `${answer?.author_type || answer?.authorType || answer?.sender_type || answer?.senderType || ''}`.toLowerCase();
     if (sender.includes('seller') || sender.includes('manager') || sender.includes('vendor')) return 'MANAGER';
@@ -2422,9 +2502,12 @@ class OzonSyncService extends MarketplaceSyncService {
         logger.debug(`Ozon ${cabinet.name}: sample question payload ${JSON.stringify(questions[0]).slice(0, 2500)}`);
       }
 
+      const syncedQuestionIds = [];
+
       for (const rawQuestion of questions) {
         const questionId = this.getOzonQuestionId(rawQuestion);
         if (!questionId) continue;
+        syncedQuestionIds.push(questionId);
 
         const { info, answers } = await this.fetchOzonQuestionDetails(cabinet, questionId);
         if (info) {
@@ -2463,22 +2546,40 @@ class OzonSyncService extends MarketplaceSyncService {
         }
 
         const mergedAnswers = [...embeddedAnswers, ...answers];
+        let hasSellerAnswer = false;
         for (const answer of mergedAnswers) {
           const answerText = this.getOzonAnswerText(answer);
           if (!answerText) continue;
 
           const answerId = answer?.answer_id || answer?.answerId || answer?.id || `${questionId}-${this.getOzonAnswerCreatedAt(answer, questionCreatedAt)}`;
+          const senderType = this.normalizeOzonAnswerSenderType(answer);
+          if (senderType === 'MANAGER') {
+            hasSellerAnswer = true;
+          }
           await this.processIncomingMessage(cabinet, {
             externalChatId,
             customerName,
             text: answerText,
             externalMsgId: `ozon-question-answer-${answerId}`,
             conversationType: 'QUESTION',
-            senderType: this.normalizeOzonAnswerSenderType(answer),
+            senderType,
             createdAt: this.getOzonAnswerCreatedAt(answer, questionCreatedAt),
           }, io);
         }
+
+        const questionState = this.getOzonQuestionState(question, hasSellerAnswer);
+
+        await prisma.chat.updateMany({
+          where: {
+            cabinetId: cabinet.id,
+            externalChatId,
+            conversationType: 'QUESTION',
+          },
+          data: questionState,
+        });
       }
+
+      await this.reconcileStaleOzonQuestionStates(cabinet, syncedQuestionIds);
 
       logger.info(`Ozon ${cabinet.name}: синхронизировано ${questions.length} вопросов`);
     } catch (error) {
