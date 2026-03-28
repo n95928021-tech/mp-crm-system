@@ -2026,6 +2026,31 @@ class OzonSyncService extends MarketplaceSyncService {
         };
   }
 
+  getOzonChatState(chatData, chatMeta, unreadCount = 0) {
+    const rawStatus = `${chatMeta?.chat_status || chatData?.chat_status || chatMeta?.status || chatData?.status || ''}`
+      .trim()
+      .toUpperCase();
+
+    if (['CLOSED', 'CLOSED_BY_OPERATOR', 'ARCHIVED', 'FINISHED', 'RESOLVED'].includes(rawStatus)) {
+      return {
+        unreadCount: 0,
+        status: 'RESOLVED',
+      };
+    }
+
+    if (['BLOCKED', 'SUSPENDED', 'ON_HOLD', 'WAITING'].includes(rawStatus)) {
+      return {
+        unreadCount,
+        status: 'PENDING',
+      };
+    }
+
+    return {
+      unreadCount,
+      status: 'OPEN',
+    };
+  }
+
   async reconcileStaleOzonQuestionStates(cabinet, currentQuestionIds = []) {
     const activeIds = new Set((currentQuestionIds || []).filter(Boolean).map((id) => `ozon-q-${id}`));
     const staleQuestions = await prisma.chat.findMany({
@@ -2657,6 +2682,7 @@ class OzonSyncService extends MarketplaceSyncService {
         const unreadCount = chatData.unread_count || chatMeta.unread_count || 0;
         const lastMessageText = this.getOzonLastMessageText(chatData, chatMeta);
         const lastMessageAt = this.getOzonLastMessageAt(chatData, chatMeta);
+        const chatState = this.getOzonChatState(chatData, chatMeta, unreadCount);
 
         const existingChat = await prisma.chat.findFirst({
           where: {
@@ -2676,8 +2702,8 @@ class OzonSyncService extends MarketplaceSyncService {
               externalChatId,
               customerName,
               customerExternalId: sortKey || null,
-              status: 'OPEN',
-              unreadCount,
+              status: chatState.status,
+              unreadCount: chatState.unreadCount,
               lastMessageText,
               lastMessageAt,
             },
@@ -2688,10 +2714,10 @@ class OzonSyncService extends MarketplaceSyncService {
             data: {
               customerName,
               customerExternalId: sortKey || existingChat.customerExternalId,
-              unreadCount,
+              unreadCount: chatState.unreadCount,
               lastMessageText: lastMessageText || existingChat.lastMessageText,
               lastMessageAt: lastMessageAt || existingChat.lastMessageAt,
-              status: 'OPEN',
+              status: chatState.status,
             },
           });
         }
@@ -2742,7 +2768,7 @@ class OzonSyncService extends MarketplaceSyncService {
                   : lastHistoryMessage.customerName || chatRecord.customerName,
               lastMessageText: lastHistoryMessage.text,
               lastMessageAt: lastHistoryMessage.createdAt,
-              status: 'OPEN',
+              status: chatState.status,
             },
           });
         }
