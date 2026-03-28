@@ -446,6 +446,8 @@ class WildberriesSyncService extends MarketplaceSyncService {
         return;
       }
 
+      await this.suppressLegacyWbChats(cabinet.id);
+
       const response = await axios.get(`${this.chatBaseUrl}${this.chatListPath}`, {
         headers: { Authorization: cabinet.apiToken },
         timeout: 10000,
@@ -481,7 +483,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
         const chatId = this.normalizeWbChatId(chatIdRaw);
         if (!chatIdRaw || !chatId) continue;
 
-        const externalChatId = `wb-chat-${chatIdRaw}`;
+        const externalChatId = this.getWbCanonicalExternalChatId(chatIdRaw);
         const customerName = this.getWbChatCustomerName(chatData);
         const replySign = this.getWbChatReplySign(chatData);
         const unreadCountInfo = this.getWbChatUnreadCount(chatData);
@@ -489,16 +491,15 @@ class WildberriesSyncService extends MarketplaceSyncService {
         const lastMessageAtRaw = this.getWbChatLastMessageAt(chatData);
         const lastMessageAt = lastMessageAtRaw ? this.parseMessageDate(lastMessageAtRaw) : null;
 
-        const existingChat = await prisma.chat.findFirst({
-          where: {
-            cabinetId: cabinet.id,
-            externalChatId,
-            conversationType: 'CHAT',
-          },
-        });
+        const existingChats = await this.findExistingWbChats(cabinet.id, chatIdRaw);
+        let existingChat = existingChats[0] || null;
+        if (existingChats.length > 1 && existingChat) {
+          existingChat = await this.mergeWbChatDuplicates(existingChat, existingChats.slice(1));
+        }
 
         let chatRecord;
         if (!existingChat) {
+          const chatState = this.getWbChatState(null, unreadCountInfo.value);
           chatRecord = await prisma.chat.create({
             data: {
               cabinetId: cabinet.id,
@@ -506,25 +507,27 @@ class WildberriesSyncService extends MarketplaceSyncService {
               externalChatId,
               customerName,
               customerExternalId: replySign || null,
-              status: 'OPEN',
-              unreadCount: unreadCountInfo.value,
+              status: chatState.status,
+              unreadCount: chatState.unreadCount,
               ...(lastMessageText ? { lastMessageText } : {}),
               ...(lastMessageAt ? { lastMessageAt } : {}),
             },
           });
         } else {
           const nextUnreadCount = unreadCountInfo.present
-            ? Math.max(existingChat.unreadCount || 0, unreadCountInfo.value)
-            : existingChat.unreadCount;
+            ? unreadCountInfo.value
+            : (existingChat.unreadCount || 0);
+          const chatState = this.getWbChatState(existingChat.status, nextUnreadCount);
           chatRecord = await prisma.chat.update({
             where: { id: existingChat.id },
             data: {
+              externalChatId,
               customerName,
               customerExternalId: replySign || existingChat.customerExternalId,
-              unreadCount: nextUnreadCount,
+              unreadCount: chatState.unreadCount,
               lastMessageText: lastMessageText || existingChat.lastMessageText,
               lastMessageAt: lastMessageAt || existingChat.lastMessageAt,
-              status: 'OPEN',
+              status: chatState.status,
             },
           });
         }
@@ -564,22 +567,16 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
         let meta = savedChats.get(chatId);
         if (!meta) {
-          const externalChatIdCandidates = [
-            `wb-chat-${chatId}`,
-            `wb-chat-1:${chatId}`,
-          ];
-          const existingChat = await prisma.chat.findFirst({
-            where: {
-              cabinetId: cabinet.id,
-              externalChatId: { in: externalChatIdCandidates },
-              conversationType: 'CHAT',
-            },
-          });
+          const existingChats = await this.findExistingWbChats(cabinet.id, chatId);
+          let existingChat = existingChats[0] || null;
+          if (existingChats.length > 1 && existingChat) {
+            existingChat = await this.mergeWbChatDuplicates(existingChat, existingChats.slice(1));
+          }
 
           meta = {
             chatRecord: existingChat,
-            rawChatId: existingChat?.externalChatId?.replace(/^wb-chat-/, '') || chatId,
-            externalChatId: existingChat?.externalChatId || `wb-chat-${chatId}`,
+            rawChatId: existingChat?.externalChatId?.replace(/^wb-chat-/, '') || `1:${chatId}`,
+            externalChatId: existingChat?.externalChatId || this.getWbCanonicalExternalChatId(chatId),
             customerName: this.getWbEventCustomerName(chatEvents[chatEvents.length - 1]) || 'Покупатель WB',
             unreadCountInfo: { present: false, value: 0 },
             listLastMessageAt: null,
@@ -630,15 +627,18 @@ class WildberriesSyncService extends MarketplaceSyncService {
         }
 
         if (chatRecordId) {
+          const nextUnreadCount = meta.unreadCountInfo.present
+            ? meta.unreadCountInfo.value
+            : derivedUnreadCount;
+          const chatState = this.getWbChatState(meta.chatRecord?.status, nextUnreadCount);
           await prisma.chat.update({
             where: { id: chatRecordId },
             data: {
               customerName: this.getWbEventCustomerName(lastEvent) || meta.customerName || meta.chatRecord?.customerName,
               lastMessageText: lastEventText,
               lastMessageAt: lastEventAt,
-              unreadCount: meta.unreadCountInfo.present
-                ? Math.max(meta.chatRecord?.unreadCount || 0, meta.unreadCountInfo.value, derivedUnreadCount)
-                : derivedUnreadCount,
+              unreadCount: chatState.unreadCount,
+              status: chatState.status,
             },
           });
         }
@@ -706,16 +706,16 @@ class WildberriesSyncService extends MarketplaceSyncService {
         const derivedUnreadCount = this.deriveWbUnreadCount(chatEvents);
         if (lastEvent && meta.chatRecord) {
           const lastEventAt = this.parseMessageDate(this.getWbEventCreatedAt(lastEvent));
+          const nextUnreadCount = meta.unreadCountInfo.present
+            ? meta.unreadCountInfo.value
+            : derivedUnreadCount;
+          const chatState = this.getWbChatState(meta.chatRecord?.status, nextUnreadCount);
           const updateData = {
             lastMessageText: this.getWbEventText(lastEvent) || meta.listLastMessageText || meta.chatRecord.lastMessageText,
             lastMessageAt: lastEventAt,
+            unreadCount: chatState.unreadCount,
+            status: chatState.status,
           };
-
-          if (meta.unreadCountInfo.present) {
-            updateData.unreadCount = Math.max(meta.chatRecord?.unreadCount || 0, meta.unreadCountInfo.value, derivedUnreadCount);
-          } else if (derivedUnreadCount > 0) {
-            updateData.unreadCount = Math.max(meta.chatRecord?.unreadCount || 0, derivedUnreadCount);
-          }
 
           await prisma.chat.update({
             where: { id: meta.chatRecord.id },
@@ -885,6 +885,45 @@ class WildberriesSyncService extends MarketplaceSyncService {
     return null;
   }
 
+  async reconcileStaleWbQuestionStates(cabinet, currentQuestionIds = []) {
+    const activeIds = new Set((currentQuestionIds || []).filter(Boolean).map((id) => `wb-q-${id}`));
+    const staleQuestions = await prisma.chat.findMany({
+      where: {
+        cabinetId: cabinet.id,
+        conversationType: 'QUESTION',
+        OR: [
+          { unreadCount: { gt: 0 } },
+          { status: 'OPEN' },
+        ],
+      },
+      select: {
+        id: true,
+        externalChatId: true,
+        status: true,
+      },
+    });
+
+    for (const staleQuestion of staleQuestions) {
+      if (!staleQuestion.externalChatId?.startsWith('wb-q-')) continue;
+      if (activeIds.has(staleQuestion.externalChatId)) continue;
+
+      const questionId = staleQuestion.externalChatId.replace('wb-q-', '');
+
+      try {
+        const question = await this.fetchWbQuestionById(cabinet, questionId);
+        if (!question) continue;
+
+        const answerText = question.answer?.text || question.answerText || question.answer;
+        await prisma.chat.update({
+          where: { id: staleQuestion.id },
+          data: this.getWbQuestionState(question, Boolean(answerText), staleQuestion.status),
+        });
+      } catch (error) {
+        logger.warn(`WB ${cabinet.name}: не удалось пересинхронизировать старый вопрос ${questionId}: ${error.response?.status || ''} ${error.message}`);
+      }
+    }
+  }
+
   async getChatMetadata(cabinet, externalChatId) {
     if (!cabinet?.apiToken || !externalChatId?.startsWith('wb-chat-')) {
       return null;
@@ -997,33 +1036,58 @@ class WildberriesSyncService extends MarketplaceSyncService {
         return;
       }
 
-      const response = await axios.get(`${this.baseUrl}/api/v1/questions`, {
-        headers: { Authorization: cabinet.apiToken },
-        params: {
-          isAnswered: false,
-          take: 100,
-          skip: 0,
-        },
-        timeout: 10000,
-      });
+      const headers = { Authorization: cabinet.apiToken };
+      const [openResponse, answeredResponse] = await Promise.all([
+        axios.get(`${this.baseUrl}/api/v1/questions`, {
+          headers,
+          params: {
+            isAnswered: false,
+            take: 100,
+            skip: 0,
+          },
+          timeout: 10000,
+        }),
+        axios.get(`${this.baseUrl}/api/v1/questions`, {
+          headers,
+          params: {
+            isAnswered: true,
+            take: 100,
+            skip: 0,
+          },
+          timeout: 10000,
+        }),
+      ]);
 
-      const questions = response.data?.data?.questions || [];
+      const openQuestions = Array.isArray(openResponse.data?.data?.questions)
+        ? openResponse.data.data.questions
+        : [];
+      const answeredQuestions = Array.isArray(answeredResponse.data?.data?.questions)
+        ? answeredResponse.data.data.questions
+        : [];
 
-      for (const q of questions) {
+      const currentQuestionIds = [];
+      const processQuestion = async (q) => {
+        if (!q?.id) return;
+
+        currentQuestionIds.push(q.id);
+
+        const customerName = q.userName || 'Покупатель WB';
+        const answerText = q.answer?.text || q.answerText || q.answer;
+        const questionState = this.getWbQuestionState(q, Boolean(answerText));
+
         await this.processIncomingMessage(cabinet, {
           externalChatId: `wb-q-${q.id}`,
-          customerName: q.userName || 'Покупатель WB',
+          customerName,
           text: q.text,
           externalMsgId: `wb-msg-${q.id}`,
           conversationType: 'QUESTION',
           createdAt: q.createdDate || q.createdAt,
         }, io);
 
-        const answerText = q.answer?.text || q.answerText || q.answer;
         if (answerText) {
           await this.processIncomingMessage(cabinet, {
             externalChatId: `wb-q-${q.id}`,
-            customerName: q.userName || 'Покупатель WB',
+            customerName,
             text: answerText,
             externalMsgId: `wb-answer-${q.id}`,
             conversationType: 'QUESTION',
@@ -1031,14 +1095,28 @@ class WildberriesSyncService extends MarketplaceSyncService {
             createdAt: q.answer?.createdDate || q.answer?.createdAt || q.updatedDate || q.updatedAt,
           }, io);
         }
-      }
+
+        await prisma.chat.updateMany({
+          where: {
+            cabinetId: cabinet.id,
+            externalChatId: `wb-q-${q.id}`,
+            conversationType: 'QUESTION',
+          },
+          data: questionState,
+        });
+      };
+
+      for (const q of openQuestions) await processQuestion(q);
+      for (const q of answeredQuestions) await processQuestion(q);
+
+      await this.reconcileStaleWbQuestionStates(cabinet, currentQuestionIds);
 
       await prisma.cabinet.update({
         where: { id: cabinet.id },
         data: { lastSyncAt: new Date() },
       });
 
-      logger.info(`WB ${cabinet.name}: синхронизировано ${questions.length} вопросов`);
+      logger.info(`WB ${cabinet.name}: синхронизировано ${openQuestions.length} открытых и ${answeredQuestions.length} отвеченных вопросов`);
     } catch (error) {
       logger.error(`WB ${cabinet.name} ошибка синхронизации вопросов: ${error.message} | response: ${JSON.stringify(error.response?.data)}`);
     }
@@ -1245,6 +1323,110 @@ class WildberriesSyncService extends MarketplaceSyncService {
     return raw.startsWith('1:') ? raw.slice(2) : raw;
   }
 
+  getWbCanonicalExternalChatId(chatId) {
+    const normalized = this.normalizeWbChatId(chatId);
+    if (!normalized) return '';
+    return `wb-chat-1:${normalized}`;
+  }
+
+  getWbExternalChatIdCandidates(chatId) {
+    const raw = String(chatId || '').trim();
+    const normalized = this.normalizeWbChatId(raw);
+
+    return [...new Set([
+      raw ? `wb-chat-${raw}` : '',
+      normalized ? `wb-chat-${normalized}` : '',
+      normalized ? `wb-chat-1:${normalized}` : '',
+    ].filter(Boolean))];
+  }
+
+  async findExistingWbChats(cabinetId, chatId) {
+    const externalChatIds = this.getWbExternalChatIdCandidates(chatId);
+    if (!externalChatIds.length) return [];
+
+    return prisma.chat.findMany({
+      where: {
+        cabinetId,
+        externalChatId: { in: externalChatIds },
+        conversationType: 'CHAT',
+      },
+      orderBy: [
+        { lastMessageAt: 'desc' },
+        { updatedAt: 'desc' },
+        { createdAt: 'asc' },
+      ],
+    });
+  }
+
+  async suppressLegacyWbChats(cabinetId) {
+    if (!cabinetId) return;
+
+    await prisma.chat.updateMany({
+      where: {
+        cabinetId,
+        conversationType: 'CHAT',
+        OR: [
+          { externalChatId: null },
+          { externalChatId: '' },
+        ],
+      },
+      data: {
+        unreadCount: 0,
+        status: 'RESOLVED',
+      },
+    });
+  }
+
+  async mergeWbChatDuplicates(primaryChat, duplicateChats = []) {
+    if (!primaryChat || !duplicateChats.length) {
+      return primaryChat;
+    }
+
+    const duplicateIds = duplicateChats.map((chat) => chat.id).filter(Boolean);
+    if (!duplicateIds.length) {
+      return primaryChat;
+    }
+
+    await prisma.chatMessage.updateMany({
+      where: { chatId: { in: duplicateIds } },
+      data: { chatId: primaryChat.id },
+    });
+
+    const mergedUnreadCount = Math.max(
+      Number(primaryChat.unreadCount || 0) || 0,
+      ...duplicateChats.map((chat) => Number(chat.unreadCount || 0) || 0),
+    );
+
+    const latestChat = [primaryChat, ...duplicateChats].sort((a, b) => {
+      const bTime = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+      const aTime = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime;
+
+      const bUpdated = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      const aUpdated = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      return bUpdated - aUpdated;
+    })[0];
+
+    const mergedChat = await prisma.chat.update({
+      where: { id: primaryChat.id },
+      data: {
+        externalChatId: this.getWbCanonicalExternalChatId(primaryChat.externalChatId),
+        customerName: primaryChat.customerName || duplicateChats.find((chat) => chat.customerName)?.customerName || 'Покупатель WB',
+        customerExternalId: primaryChat.customerExternalId || duplicateChats.find((chat) => chat.customerExternalId)?.customerExternalId || null,
+        unreadCount: mergedUnreadCount,
+        status: this.getWbChatState(primaryChat.status, mergedUnreadCount).status,
+        lastMessageAt: latestChat?.lastMessageAt || primaryChat.lastMessageAt,
+        lastMessageText: latestChat?.lastMessageText || primaryChat.lastMessageText,
+      },
+    });
+
+    await prisma.chat.deleteMany({
+      where: { id: { in: duplicateIds } },
+    });
+
+    return mergedChat;
+  }
+
   getWbChatReplySign(chatData) {
     return chatData?.replySign || chatData?.reply_sign || chatData?.replysign || null;
   }
@@ -1279,6 +1461,72 @@ class WildberriesSyncService extends MarketplaceSyncService {
     return {
       present: presentValue !== undefined,
       value: Number(presentValue || 0) || 0,
+    };
+  }
+
+  getWbChatState(existingStatus = null, unreadCount = 0) {
+    const normalizedStatus = String(existingStatus || '').trim().toUpperCase();
+    const normalizedUnread = Math.max(Number(unreadCount || 0) || 0, 0);
+
+    if (normalizedUnread > 0) {
+      return {
+        unreadCount: normalizedUnread,
+        status: 'OPEN',
+      };
+    }
+
+    if (normalizedStatus === 'PENDING' || normalizedStatus === 'CLOSED') {
+      return {
+        unreadCount: 0,
+        status: normalizedStatus,
+      };
+    }
+
+    return {
+      unreadCount: 0,
+      status: 'RESOLVED',
+    };
+  }
+
+  getWbQuestionState(question, hasAnswer = false, existingStatus = null) {
+    const answeredFlag = [
+      question?.isAnswered,
+      question?.is_answered,
+      question?.answered,
+    ].find((value) => value !== undefined && value !== null);
+
+    if (answeredFlag === false) {
+      return {
+        unreadCount: 1,
+        status: 'OPEN',
+      };
+    }
+
+    if (answeredFlag === true) {
+      return {
+        unreadCount: 0,
+        status: 'RESOLVED',
+      };
+    }
+
+    if (hasAnswer) {
+      return {
+        unreadCount: 0,
+        status: 'RESOLVED',
+      };
+    }
+
+    const normalizedStatus = String(existingStatus || '').trim().toUpperCase();
+    if (normalizedStatus === 'PENDING' || normalizedStatus === 'CLOSED') {
+      return {
+        unreadCount: 0,
+        status: normalizedStatus,
+      };
+    }
+
+    return {
+      unreadCount: 1,
+      status: 'OPEN',
     };
   }
 

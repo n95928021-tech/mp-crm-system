@@ -66,7 +66,10 @@ exports.getChats = async (req, res, next) => {
 
     const where = { conversationType };
     if (conversationType === 'CHAT') {
-      where.externalChatId = { not: null };
+      where.AND = [
+        { externalChatId: { not: null } },
+        { externalChatId: { not: '' } },
+      ];
     }
 
     // Фильтр по кабинету

@@ -1,13 +1,22 @@
 const prisma = require('../config/database');
 const logger = require('../utils/logger');
 
+const buildRealChatWhere = (extra = {}) => ({
+  conversationType: 'CHAT',
+  AND: [
+    { externalChatId: { not: null } },
+    { externalChatId: { not: '' } },
+  ],
+  ...extra,
+});
+
 // GET /analytics/response-time — среднее время ответа
 exports.getResponseTimeAnalytics = async (req, res, next) => {
   try {
     const { startDate, endDate, cabinetId, marketplaceId } = req.query;
 
     // Базовый фильтр
-    const chatWhere = { conversationType: 'CHAT' };
+    const chatWhere = buildRealChatWhere();
     if (cabinetId) chatWhere.cabinetId = cabinetId;
     if (marketplaceId) chatWhere.cabinet = { marketplaceId };
 
@@ -134,7 +143,7 @@ exports.exportResponseTimeCSV = async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
 
-    const chatWhere = { conversationType: 'CHAT' };
+    const chatWhere = buildRealChatWhere();
     if (startDate || endDate) {
       chatWhere.createdAt = {};
       if (startDate) chatWhere.createdAt.gte = new Date(startDate);
@@ -216,8 +225,8 @@ exports.getDashboard = async (req, res, next) => {
       totalMessages,
       unreadMessages,
     ] = await Promise.all([
-      prisma.chat.count({ where: { conversationType: 'CHAT' } }),
-      prisma.chat.count({ where: { conversationType: 'CHAT', status: 'OPEN' } }),
+      prisma.chat.count({ where: buildRealChatWhere() }),
+      prisma.chat.count({ where: buildRealChatWhere({ status: 'OPEN' }) }),
       prisma.task.count({ where: { userId: req.user.id } }),
       prisma.task.count({
         where: {
@@ -227,7 +236,7 @@ exports.getDashboard = async (req, res, next) => {
         },
       }),
       prisma.chatMessage.count(),
-      prisma.chat.aggregate({ where: { conversationType: 'CHAT' }, _sum: { unreadCount: true } }),
+      prisma.chat.aggregate({ where: buildRealChatWhere(), _sum: { unreadCount: true } }),
     ]);
 
     res.json({
