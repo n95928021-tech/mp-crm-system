@@ -370,6 +370,8 @@ class WildberriesSyncService extends MarketplaceSyncService {
     this.baseUrl = config.marketplaces.wb.baseUrl;
     this.chatBaseUrl = config.marketplaces.wb.chatBaseUrl;
     this.chatListPath = config.marketplaces.wb.chatListPath;
+    this.chatUpdatesUrl = config.marketplaces.wb.chatUpdatesUrl;
+    this.chatUpdatesRootVersion = config.marketplaces.wb.chatUpdatesRootVersion;
     this.chatEventsPath = config.marketplaces.wb.chatEventsPath;
     this.chatMessagePath = config.marketplaces.wb.chatMessagePath;
     this.chatDownloadPath = config.marketplaces.wb.chatDownloadPath;
@@ -477,6 +479,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
       }
 
       const savedChats = new Map();
+      const liveUnreadByChatId = await this.fetchWbLiveUnreadCounts(cabinet);
 
       for (const chatData of normalizedChats) {
         const chatIdRaw = this.getWbChatId(chatData);
@@ -486,7 +489,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
         const externalChatId = this.getWbCanonicalExternalChatId(chatIdRaw);
         const customerName = this.getWbChatCustomerName(chatData);
         const replySign = this.getWbChatReplySign(chatData);
-        const unreadCountInfo = this.getWbChatUnreadCount(chatData);
+        const unreadCountInfo = this.getWbChatUnreadCount(chatData, liveUnreadByChatId.get(chatId));
         const lastMessageText = this.getWbChatLastMessageText(chatData);
         const lastMessageAtRaw = this.getWbChatLastMessageAt(chatData);
         const lastMessageAt = lastMessageAtRaw ? this.parseMessageDate(lastMessageAtRaw) : null;
@@ -514,9 +517,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
             },
           });
         } else {
-          const nextUnreadCount = unreadCountInfo.present
-            ? unreadCountInfo.value
-            : (existingChat.unreadCount || 0);
+          const nextUnreadCount = this.resolveWbUnreadCount(chatId, unreadCountInfo, 0, liveUnreadByChatId);
           const chatState = this.getWbChatState(existingChat.status, nextUnreadCount);
           chatRecord = await prisma.chat.update({
             where: { id: existingChat.id },
@@ -627,9 +628,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
         }
 
         if (chatRecordId) {
-          const nextUnreadCount = meta.unreadCountInfo.present
-            ? meta.unreadCountInfo.value
-            : derivedUnreadCount;
+          const nextUnreadCount = this.resolveWbUnreadCount(chatId, meta.unreadCountInfo, derivedUnreadCount, liveUnreadByChatId);
           const chatState = this.getWbChatState(meta.chatRecord?.status, nextUnreadCount);
           await prisma.chat.update({
             where: { id: chatRecordId },
@@ -706,9 +705,7 @@ class WildberriesSyncService extends MarketplaceSyncService {
         const derivedUnreadCount = this.deriveWbUnreadCount(chatEvents);
         if (lastEvent && meta.chatRecord) {
           const lastEventAt = this.parseMessageDate(this.getWbEventCreatedAt(lastEvent));
-          const nextUnreadCount = meta.unreadCountInfo.present
-            ? meta.unreadCountInfo.value
-            : derivedUnreadCount;
+          const nextUnreadCount = this.resolveWbUnreadCount(chatId, meta.unreadCountInfo, derivedUnreadCount, liveUnreadByChatId);
           const chatState = this.getWbChatState(meta.chatRecord?.status, nextUnreadCount);
           const updateData = {
             lastMessageText: this.getWbEventText(lastEvent) || meta.listLastMessageText || meta.chatRecord.lastMessageText,
@@ -1441,8 +1438,9 @@ class WildberriesSyncService extends MarketplaceSyncService {
     );
   }
 
-  getWbChatUnreadCount(chatData) {
+  getWbChatUnreadCount(chatData, liveUnreadCount = null) {
     const candidates = [
+      liveUnreadCount,
       chatData?.unreadCount,
       chatData?.unread_count,
       chatData?.unreadMessagesCount,
@@ -1462,6 +1460,80 @@ class WildberriesSyncService extends MarketplaceSyncService {
       present: presentValue !== undefined,
       value: Number(presentValue || 0) || 0,
     };
+  }
+
+  resolveWbUnreadCount(chatId, unreadCountInfo, derivedUnreadCount, liveUnreadByChatId = null) {
+    const liveUnread = liveUnreadByChatId?.get?.(chatId);
+    if (Number.isFinite(liveUnread)) {
+      return Math.max(Number(liveUnread) || 0, 0);
+    }
+    if (unreadCountInfo?.present) {
+      return unreadCountInfo.value;
+    }
+    return Math.max(Number(derivedUnreadCount || 0) || 0, 0);
+  }
+
+  getWbUpdatesAuthHeaders(cabinet) {
+    const authorizeV3 = String(cabinet?.apiClientId || '').trim();
+    const wbSellerLk = String(cabinet?.apiKey || '').trim();
+    const wbCookie = String(cabinet?.campaignId || '').trim();
+
+    if (!authorizeV3 || !wbSellerLk) {
+      return null;
+    }
+
+    const headers = {
+      'Content-Type': 'application/json',
+      Accept: '*/*',
+      Origin: 'https://seller.wildberries.ru',
+      Referer: 'https://seller.wildberries.ru/',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-site',
+      'Accept-Language': 'ru',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'root-version': this.chatUpdatesRootVersion || 'v1.86.1',
+      AuthorizeV3: authorizeV3,
+      'Wb-Seller-Lk': wbSellerLk,
+    };
+
+    if (wbCookie) {
+      headers.Cookie = wbCookie;
+    }
+
+    return headers;
+  }
+
+  async fetchWbLiveUnreadCounts(cabinet) {
+    const headers = this.getWbUpdatesAuthHeaders(cabinet);
+    if (!headers || !this.chatUpdatesUrl) {
+      return new Map();
+    }
+
+    try {
+      const response = await axios.post(
+        this.chatUpdatesUrl,
+        { lp: true, lastTime: 0 },
+        { headers, timeout: 12000 },
+      );
+
+      const payload = response.data && typeof response.data === 'object' ? response.data : {};
+      const unreadByChatId = new Map();
+
+      for (const [rawChatId, value] of Object.entries(payload)) {
+        const normalizedChatId = this.normalizeWbChatId(rawChatId);
+        if (!normalizedChatId) continue;
+        const unreadCount = Number(value?.unreadCount);
+        if (!Number.isFinite(unreadCount)) continue;
+        unreadByChatId.set(normalizedChatId, Math.max(unreadCount, 0));
+      }
+
+      logger.info(`WB ${cabinet.name}: updates endpoint вернул unreadCount для ${unreadByChatId.size} чатов`);
+      return unreadByChatId;
+    } catch (error) {
+      logger.warn(`WB ${cabinet.name}: updates endpoint недоступен, fallback на events/list (${error.response?.status || 'no-status'})`);
+      return new Map();
+    }
   }
 
   getWbChatState(existingStatus = null, unreadCount = 0) {
@@ -1811,6 +1883,8 @@ class OzonSyncService extends MarketplaceSyncService {
     this.chatHistoryPath = config.marketplaces.ozon.chatHistoryPath;
     this.reviewListPath = config.marketplaces.ozon.reviewListPath;
     this.productInfoListPath = config.marketplaces.ozon.productInfoListPath;
+    this.postingFbsGetPath = config.marketplaces.ozon.postingFbsGetPath;
+    this.postingFboGetPath = config.marketplaces.ozon.postingFboGetPath;
     this.questionListPath = config.marketplaces.ozon.questionListPath;
     this.questionInfoPath = config.marketplaces.ozon.questionInfoPath;
     this.questionAnswerListPath = config.marketplaces.ozon.questionAnswerListPath;
@@ -2079,6 +2153,23 @@ class OzonSyncService extends MarketplaceSyncService {
     }
 
     return 'CUSTOMER';
+  }
+
+  extractOzonOrderIdFromText(text) {
+    const source = String(text || '').trim();
+    if (!source) return '';
+
+    const patterns = [
+      /(?:отправление|заказ)\s*№?\s*([A-ZА-ЯЁOО]?\d{6,12}-\d{3,5}-\d)/i,
+      /\b([A-ZА-ЯЁOО]?\d{6,12}-\d{3,5}-\d)\b/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = source.match(pattern);
+      if (match?.[1]) return match[1].trim();
+    }
+
+    return '';
   }
 
   extractOzonText(value) {
@@ -2439,7 +2530,7 @@ class OzonSyncService extends MarketplaceSyncService {
       return '';
     };
 
-    const productUrl = (
+    const rawProductUrl = (
       source.product_url ||
       source.productUrl ||
       source.offer?.url ||
@@ -2466,7 +2557,7 @@ class OzonSyncService extends MarketplaceSyncService {
       source.item?.title ||
       findByKeyHints(source, ['product_name', 'offer_name', 'item_name', 'sku_name', 'nm_name']) ||
       (() => {
-        const match = productUrl.match(/\/product\/([^/?#]+)/i);
+        const match = rawProductUrl.match(/\/product\/([^/?#]+)/i);
         if (!match?.[1]) return '';
         const slug = decodeURIComponent(match[1]).replace(/-\d+$/, '');
         return slug.replace(/-/g, ' ').trim();
@@ -2543,6 +2634,87 @@ class OzonSyncService extends MarketplaceSyncService {
 
     const productImage = this.extractProductImageUrl(source) || '';
 
+    const orderId = (
+      source.order_id ||
+      source.orderId ||
+      source.order_number ||
+      source.orderNumber ||
+      source.context?.order_id ||
+      source.context?.orderId ||
+      source.context?.order_number ||
+      source.context?.orderNumber ||
+      source.last_message?.context?.order_id ||
+      source.last_message?.context?.orderId ||
+      source.last_message?.context?.order_number ||
+      source.last_message?.context?.orderNumber ||
+      ''
+    ).toString().trim();
+
+    const orderDateRaw =
+      source.order_date ||
+      source.orderDate ||
+      source.context?.order_date ||
+      source.context?.orderDate ||
+      source.context?.order_created_at ||
+      source.context?.orderCreatedAt ||
+      source.last_message?.context?.order_date ||
+      source.last_message?.context?.orderDate ||
+      source.last_message?.context?.order_created_at ||
+      source.last_message?.context?.orderCreatedAt ||
+      null;
+    const orderDate = orderDateRaw ? this.parseMessageDate(orderDateRaw) : null;
+
+    const orderCity = (
+      source.city ||
+      source.order_city ||
+      source.orderCity ||
+      source.delivery_city ||
+      source.deliveryCity ||
+      source.context?.city ||
+      source.context?.order_city ||
+      source.context?.orderCity ||
+      source.context?.delivery_city ||
+      source.context?.deliveryCity ||
+      source.last_message?.context?.city ||
+      source.last_message?.context?.order_city ||
+      source.last_message?.context?.orderCity ||
+      source.last_message?.context?.delivery_city ||
+      source.last_message?.context?.deliveryCity ||
+      ''
+    ).toString().trim();
+
+    const orderSchemeRaw = (
+      source.scheme ||
+      source.order_scheme ||
+      source.orderScheme ||
+      source.delivery_scheme ||
+      source.deliveryScheme ||
+      source.context?.scheme ||
+      source.context?.order_scheme ||
+      source.context?.orderScheme ||
+      source.context?.delivery_scheme ||
+      source.context?.deliveryScheme ||
+      source.last_message?.context?.scheme ||
+      source.last_message?.context?.order_scheme ||
+      source.last_message?.context?.orderScheme ||
+      source.last_message?.context?.delivery_scheme ||
+      source.last_message?.context?.deliveryScheme ||
+      ''
+    ).toString().trim();
+    const orderScheme = orderSchemeRaw ? orderSchemeRaw.toUpperCase() : 'Ozon';
+
+    let productUrl = rawProductUrl;
+    if (!productUrl) {
+      if (productId && /^\d+$/.test(productId)) {
+        productUrl = `https://www.ozon.ru/product/${productId}/`;
+      } else {
+        const query = sellerArticle || offerId || '';
+        if (query) {
+          productUrl = `https://www.ozon.ru/search/?text=${encodeURIComponent(query)}`;
+        }
+      }
+    }
+
     return {
       productTitle,
       sellerArticle,
@@ -2551,6 +2723,10 @@ class OzonSyncService extends MarketplaceSyncService {
       offerId,
       sku,
       productId,
+      orderId,
+      orderDate,
+      orderCity,
+      orderScheme,
     };
   }
 
@@ -2688,12 +2864,17 @@ class OzonSyncService extends MarketplaceSyncService {
 
     const questionId = externalChatId.replace('ozon-q-', '');
     const { info } = await this.fetchOzonQuestionDetails(cabinet, questionId);
-    const meta = await this.enrichOzonProductMetadata(cabinet, this.extractOzonProductMetadata(info || {}));
+    let meta = await this.enrichOzonProductMetadata(cabinet, this.extractOzonProductMetadata(info || {}));
+    meta = await this.enrichOzonMetadataFromOrder(cabinet, meta);
     return {
       productTitle: meta.productTitle,
       sellerArticle: meta.sellerArticle,
       productImage: meta.productImage || '',
       productUrl: meta.productUrl || '',
+      orderId: meta.orderId || '',
+      orderDate: meta.orderDate || null,
+      orderCity: meta.orderCity || '',
+      orderScheme: meta.orderScheme || 'Ozon',
       orderTitle: meta.productTitle || '',
     };
   }
@@ -2717,8 +2898,7 @@ class OzonSyncService extends MarketplaceSyncService {
     );
 
     const chats = response.data?.result?.chats || response.data?.chats || [];
-    const matched = (Array.isArray(chats) ? chats : []).find((item) => String(this.getOzonChatId(item, item.chat || item) || '') === String(chatId));
-    if (!matched) return null;
+    const matched = (Array.isArray(chats) ? chats : []).find((item) => String(this.getOzonChatId(item, item.chat || item) || '') === String(chatId)) || null;
 
     const messages = await this.fetchOzonHistory(cabinet, chatId);
     const contextSeed = [...messages]
@@ -2728,21 +2908,189 @@ class OzonSyncService extends MarketplaceSyncService {
         return ctx && (ctx.sku || ctx.sku_id || ctx.product_id || ctx.offer_id || ctx.order_number);
       }) || null;
 
-    const meta = await this.enrichOzonProductMetadata(cabinet, this.extractOzonProductMetadata({
-      ...matched,
-      ...(matched.chat || {}),
-      last_message: matched.last_message || matched.chat?.last_message || null,
+    const seedMeta = this.extractOzonProductMetadata({
+      ...(matched || {}),
+      ...((matched && matched.chat) || {}),
+      last_message: matched?.last_message || matched?.chat?.last_message || null,
       context: contextSeed?.context || contextSeed?.message?.context || contextSeed?.payload?.context || null,
       message: contextSeed || null,
-    }));
+    });
+    if (!seedMeta.orderId) {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const candidateText = this.extractOzonText(messages[index]);
+        const parsedOrderId = this.extractOzonOrderIdFromText(candidateText);
+        if (parsedOrderId) {
+          seedMeta.orderId = parsedOrderId;
+          break;
+        }
+      }
+    }
+    let meta = await this.enrichOzonProductMetadata(cabinet, seedMeta);
+    meta = await this.enrichOzonMetadataFromOrder(cabinet, meta);
 
     return {
       productTitle: meta.productTitle,
       sellerArticle: meta.sellerArticle,
       productImage: meta.productImage || '',
       productUrl: meta.productUrl || '',
+      orderId: meta.orderId || seedMeta.orderId || '',
+      orderDate: meta.orderDate || seedMeta.orderDate || null,
+      orderCity: meta.orderCity || seedMeta.orderCity || '',
+      orderScheme: meta.orderScheme || seedMeta.orderScheme || 'Ozon',
       orderTitle: meta.productTitle || '',
     };
+  }
+
+  extractOzonPostingMetadata(posting) {
+    if (!posting || typeof posting !== 'object') return null;
+    const items = posting.products || posting.items || posting.order_items || posting.orderItems || [];
+    const first = Array.isArray(items) ? items.find((item) => item && typeof item === 'object') : null;
+    if (!first) return null;
+
+    const productTitle = (
+      first.name ||
+      first.product_name ||
+      first.offer_name ||
+      first.title ||
+      ''
+    ).toString().trim();
+
+    const sellerArticle = (
+      first.offer_id ||
+      first.offerId ||
+      first.seller_sku ||
+      first.sellerSku ||
+      first.vendor_code ||
+      first.vendorCode ||
+      ''
+    ).toString().trim();
+
+    const skuRaw = first.sku || first.sku_id || first.skuId || null;
+    const productIdRaw = first.product_id || first.productId || first.id || null;
+    const sku = skuRaw === null || skuRaw === undefined || skuRaw === '' ? null : String(skuRaw).trim();
+    const productId = productIdRaw === null || productIdRaw === undefined || productIdRaw === '' ? null : String(productIdRaw).trim();
+    const productUrl = productId && /^\d+$/.test(productId)
+      ? `https://www.ozon.ru/product/${productId}/`
+      : (sellerArticle ? `https://www.ozon.ru/search/?text=${encodeURIComponent(sellerArticle)}` : '');
+
+    return {
+      productTitle,
+      sellerArticle,
+      offerId: sellerArticle || '',
+      sku,
+      productId,
+      productImage: this.extractProductImageUrl(first) || '',
+      productUrl,
+    };
+  }
+
+  async fetchOzonPostingByNumber(cabinet, orderId) {
+    if (!orderId) return null;
+
+    const headers = {
+      'Client-Id': cabinet.apiClientId,
+      'Api-Key': cabinet.apiKey,
+    };
+    const normalizedOrderId = String(orderId).trim();
+    const postingNumberCandidates = Array.from(new Set([
+      normalizedOrderId,
+      (
+        /^\d{6,12}-\d{3,5}$/.test(normalizedOrderId)
+          ? `${normalizedOrderId}-1`
+          : null
+      ),
+      (
+        /^\d{6,12}-\d{3,5}-\d+$/.test(normalizedOrderId)
+          ? normalizedOrderId.replace(/-\d+$/, '')
+          : null
+      ),
+    ].filter(Boolean)));
+
+    const endpoints = [
+      this.postingFbsGetPath || '/v3/posting/fbs/get',
+      this.postingFboGetPath || '/v3/posting/fbo/get',
+      '/v2/posting/fbs/get',
+      '/v2/posting/fbo/get',
+    ];
+
+    for (const endpoint of endpoints) {
+      for (const postingNumber of postingNumberCandidates) {
+        const payloads = [
+          {
+            posting_number: postingNumber,
+            with: {
+              analytics_data: true,
+              financial_data: false,
+              translit: false,
+            },
+          },
+          { posting_number: postingNumber },
+        ];
+        for (const payload of payloads) {
+        try {
+          const response = await axios.post(`${this.baseUrl}${endpoint}`, payload, {
+            headers,
+            timeout: 10000,
+          });
+
+          const posting = response.data?.result?.posting || response.data?.result || response.data?.posting || null;
+          if (posting && typeof posting === 'object') return posting;
+        } catch (error) {
+          const status = error.response?.status;
+          if (status === 404 || status === 400) continue;
+          logger.debug(`Ozon ${cabinet.name}: posting get failed (${endpoint}): ${status || ''} ${error.message}`);
+        }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  async enrichOzonMetadataFromOrder(cabinet, seedMetadata) {
+    const orderId = (seedMetadata?.orderId || '').toString().trim();
+    if (!orderId) return seedMetadata;
+
+    const needProductData = !seedMetadata.productUrl || (!seedMetadata.sellerArticle && !seedMetadata.productId && !seedMetadata.sku);
+    if (!needProductData) return seedMetadata;
+
+    try {
+      const posting = await this.fetchOzonPostingByNumber(cabinet, orderId);
+      if (!posting) return seedMetadata;
+
+      const postingMeta = this.extractOzonPostingMetadata(posting);
+      if (!postingMeta) return seedMetadata;
+
+      const combined = {
+        ...seedMetadata,
+        productTitle: seedMetadata.productTitle || postingMeta.productTitle || '',
+        sellerArticle: seedMetadata.sellerArticle || postingMeta.sellerArticle || '',
+        offerId: seedMetadata.offerId || postingMeta.offerId || '',
+        sku: seedMetadata.sku || postingMeta.sku || null,
+        productId: seedMetadata.productId || postingMeta.productId || null,
+        productImage: seedMetadata.productImage || postingMeta.productImage || '',
+      };
+
+      const enriched = await this.enrichOzonProductMetadata(cabinet, combined);
+      const resolvedProductUrl = (
+        enriched?.productUrl ||
+        combined.productUrl ||
+        (combined.productId && /^\d+$/.test(String(combined.productId))
+          ? `https://www.ozon.ru/product/${combined.productId}/`
+          : '') ||
+        (combined.sellerArticle
+          ? `https://www.ozon.ru/search/?text=${encodeURIComponent(combined.sellerArticle)}`
+          : '')
+      );
+      return {
+        ...combined,
+        ...enriched,
+        productUrl: resolvedProductUrl,
+      };
+    } catch (error) {
+      logger.debug(`Ozon ${cabinet.name}: order metadata enrichment failed (${orderId}): ${error.response?.status || ''} ${error.message}`);
+      return seedMetadata;
+    }
   }
 
   async syncQuestions(cabinet, io) {

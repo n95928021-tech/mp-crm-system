@@ -23,14 +23,6 @@ class WebSocketService {
       timeout: 20000,
     });
 
-    this.socket.on('connect', () => {
-      console.log('🔌 WebSocket подключён');
-    });
-
-    this.socket.on('disconnect', (reason) => {
-      console.log('🔌 WebSocket отключён:', reason);
-    });
-
     this.socket.on('connect_error', (error) => {
       console.error('🔌 WebSocket ошибка:', error.message);
     });

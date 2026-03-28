@@ -14,8 +14,6 @@ const getWsService = () => {
               this._socket = window.io(import.meta.env.VITE_WS_URL || "http://localhost:4000", {
                 auth: { token }, reconnection: true, reconnectionAttempts: 10,
               });
-              this._socket.on("connect", () => console.log("🔌 WS подключён"));
-              this._socket.on("disconnect", () => console.log("🔌 WS отключён"));
               this._listeners.forEach((cbs, evt) => cbs.forEach(cb => this._socket.on(evt, cb)));
             }
           } catch(e) { console.warn("WS connect error:", e); }
@@ -1394,6 +1392,19 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const sellerArticle = currentConversation?.sellerArticle || "";
   const productImage = currentConversation?.productImage || "";
   const productUrl = currentConversation?.productUrl || "";
+  const productQuery = (sellerArticle || productTitle || "").trim();
+  const marketplaceSlug = (currentConversation?.marketplaceId || "").toString().toLowerCase();
+  let productFallbackUrl = "";
+  if (productQuery) {
+    if (marketplaceSlug === "ozon") {
+      productFallbackUrl = `https://www.ozon.ru/search/?text=${encodeURIComponent(productQuery)}`;
+    } else if (marketplaceSlug === "wb") {
+      productFallbackUrl = `https://www.wildberries.ru/catalog/0/search.aspx?search=${encodeURIComponent(productQuery)}`;
+    } else if (marketplaceSlug === "yandex") {
+      productFallbackUrl = `https://market.yandex.ru/search?text=${encodeURIComponent(productQuery)}`;
+    }
+  }
+  const productOpenUrl = productUrl || productFallbackUrl;
   const hasReviewInCurrentConversation = useMemo(() => {
     if (isQuestionsView || !currentConversation) return false;
     return visibleMessages.some((msg) => {
@@ -2379,8 +2390,8 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                                       value={vals.name} onChange={(e) => startEdit("name", e.target.value)} />
                                   </div>
 
-                                  {/* WB: API Токен */}
-                                  {mp.id === "wb" && (
+                                  {/* WB: API Токен + web session headers (optional) */}
+                                  {mp.id === "wb" && (<>
                                     <div>
                                       <label style={{ fontSize: 10, color: "#a855f7", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>API Токен WB</label>
                                       <div style={{ position: "relative" }}>
@@ -2394,7 +2405,25 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                                         </button>
                                       </div>
                                     </div>
-                                  )}
+                                    <div>
+                                      <label style={{ fontSize: 10, color: "#a855f7", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>AuthorizeV3 (опц.)</label>
+                                      <input style={{ ...S.input, fontSize: 11, padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
+                                        value={vals.apiClientId} placeholder="JWT из DevTools (updates)"
+                                        onChange={(e) => startEdit("apiClientId", e.target.value)} />
+                                    </div>
+                                    <div>
+                                      <label style={{ fontSize: 10, color: "#a855f7", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>Wb-Seller-Lk (опц.)</label>
+                                      <input style={{ ...S.input, fontSize: 11, padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
+                                        value={vals.apiKey} placeholder="JWT из DevTools (updates)"
+                                        onChange={(e) => startEdit("apiKey", e.target.value)} />
+                                    </div>
+                                    <div>
+                                      <label style={{ fontSize: 10, color: "#a855f7", display: "block", marginBottom: 5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>Cookie (опц.)</label>
+                                      <input style={{ ...S.input, fontSize: 11, padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}
+                                        value={vals.campaignId} placeholder="cfidsw-wb=...; __zzatw-wb=..."
+                                        onChange={(e) => startEdit("campaignId", e.target.value)} />
+                                    </div>
+                                  </>)}
 
                                   {/* Ozon: Client ID + API Key */}
                                   {mp.id === "ozon" && (<>
@@ -3255,19 +3284,19 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
                     {/* Статус чата */}
                     <button
                       onClick={() => {
-                        if (!productUrl) return;
-                        window.open(productUrl, "_blank", "noopener,noreferrer");
+                        if (!productOpenUrl) return;
+                        window.open(productOpenUrl, "_blank", "noopener,noreferrer");
                       }}
-                      disabled={!productUrl}
+                      disabled={!productOpenUrl}
                       style={{
                         display: "flex", alignItems: "center", gap: 5,
                         padding: "6px 12px", borderRadius: 8,
-                        background: productUrl ? "rgba(34,197,94,0.12)" : "rgba(148,163,184,0.08)",
-                        border: productUrl ? "1px solid rgba(34,197,94,0.25)" : "1px solid rgba(148,163,184,0.18)",
-                        color: productUrl ? "#22c55e" : "#64748b", fontSize: 11, fontWeight: 600,
-                        cursor: productUrl ? "pointer" : "not-allowed", fontFamily: "inherit",
+                        background: productOpenUrl ? "rgba(34,197,94,0.12)" : "rgba(148,163,184,0.08)",
+                        border: productOpenUrl ? "1px solid rgba(34,197,94,0.25)" : "1px solid rgba(148,163,184,0.18)",
+                        color: productOpenUrl ? "#22c55e" : "#64748b", fontSize: 11, fontWeight: 600,
+                        cursor: productOpenUrl ? "pointer" : "not-allowed", fontFamily: "inherit",
                       }}
-                      title={productUrl || "Ссылка на товар недоступна"}
+                      title={productOpenUrl || "Ссылка на товар недоступна"}
                     >
                       {Icons.eye()} Перейти на товар
                     </button>
