@@ -1467,10 +1467,17 @@ class WildberriesSyncService extends MarketplaceSyncService {
     if (Number.isFinite(liveUnread)) {
       return Math.max(Number(liveUnread) || 0, 0);
     }
+
     if (unreadCountInfo?.present) {
       return unreadCountInfo.value;
     }
-    return Math.max(Number(derivedUnreadCount || 0) || 0, 0);
+
+    const normalizedDerivedUnread = Math.max(Number(derivedUnreadCount || 0) || 0, 0);
+    if (normalizedDerivedUnread > 0) {
+      return normalizedDerivedUnread;
+    }
+
+    return normalizedDerivedUnread;
   }
 
   getWbUpdatesAuthHeaders(cabinet) {
@@ -1519,13 +1526,69 @@ class WildberriesSyncService extends MarketplaceSyncService {
 
       const payload = response.data && typeof response.data === 'object' ? response.data : {};
       const unreadByChatId = new Map();
+      const sourceBuckets = [
+        payload,
+        payload?.data,
+        payload?.updates,
+        payload?.result,
+        payload?.response,
+        payload?.items,
+        payload?.chats,
+      ];
 
-      for (const [rawChatId, value] of Object.entries(payload)) {
-        const normalizedChatId = this.normalizeWbChatId(rawChatId);
-        if (!normalizedChatId) continue;
-        const unreadCount = Number(value?.unreadCount);
-        if (!Number.isFinite(unreadCount)) continue;
-        unreadByChatId.set(normalizedChatId, Math.max(unreadCount, 0));
+      for (const bucket of sourceBuckets) {
+        if (!bucket || typeof bucket !== 'object') continue;
+
+        if (Array.isArray(bucket)) {
+          for (const row of bucket) {
+            if (!row || typeof row !== 'object') continue;
+            const rawChatId = row.chatID || row.chatId || row.id || row.chat?.chatID || row.chat?.chatId || row.chat?.id;
+            const normalizedChatId = this.normalizeWbChatId(rawChatId);
+            if (!normalizedChatId) continue;
+
+            const unreadCount = Number(
+              row.unreadCount ??
+              row.unread_count ??
+              row.newMessagesCount ??
+              row.new_messages_count ??
+              row.countUnread ??
+              row.count_unread ??
+              row.chat?.unreadCount ??
+              row.chat?.unread_count ??
+              null,
+            );
+
+            if (!Number.isFinite(unreadCount)) continue;
+            unreadByChatId.set(normalizedChatId, Math.max(unreadCount, 0));
+          }
+          continue;
+        }
+
+        for (const [key, value] of Object.entries(bucket)) {
+          const rawChatId = (value && typeof value === 'object')
+            ? (value.chatID || value.chatId || value.id || value.chat?.chatID || value.chat?.chatId || value.chat?.id || key)
+            : key;
+
+          const normalizedChatId = this.normalizeWbChatId(rawChatId);
+          if (!normalizedChatId) continue;
+
+          const unreadCount = Number(
+            typeof value === 'number'
+              ? value
+              : value?.unreadCount ??
+                value?.unread_count ??
+                value?.newMessagesCount ??
+                value?.new_messages_count ??
+                value?.countUnread ??
+                value?.count_unread ??
+                value?.chat?.unreadCount ??
+                value?.chat?.unread_count ??
+                null,
+          );
+
+          if (!Number.isFinite(unreadCount)) continue;
+          unreadByChatId.set(normalizedChatId, Math.max(unreadCount, 0));
+        }
       }
 
       logger.info(`WB ${cabinet.name}: updates endpoint вернул unreadCount для ${unreadByChatId.size} чатов`);

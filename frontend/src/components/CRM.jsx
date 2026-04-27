@@ -1392,8 +1392,24 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
   const sellerArticle = currentConversation?.sellerArticle || "";
   const productImage = currentConversation?.productImage || "";
   const productUrl = currentConversation?.productUrl || "";
-  const productQuery = (sellerArticle || productTitle || "").trim();
-  const marketplaceSlug = (currentConversation?.marketplaceId || "").toString().toLowerCase();
+  const productQuery = (
+    sellerArticle ||
+    productTitle ||
+    currentConversation?.orderId ||
+    derivedOrderInfo?.orderId ||
+    ""
+  ).trim();
+  const marketplaceSlug = (() => {
+    const rawMarketplaceId = (currentConversation?.marketplaceId || "").toString().toLowerCase();
+    if (["ozon", "wb", "yandex"].includes(rawMarketplaceId)) {
+      return rawMarketplaceId;
+    }
+
+    const marketplaceByDbId = marketplaces.find(
+      (m) => (m.dbId || "").toString().toLowerCase() === rawMarketplaceId,
+    );
+    return (marketplaceByDbId?.id || rawMarketplaceId || "").toLowerCase();
+  })();
   let productFallbackUrl = "";
   if (productQuery) {
     if (marketplaceSlug === "ozon") {
@@ -1402,6 +1418,14 @@ export default function MarketplaceCRM({ user, onLogout, apiUrl, getHeaders }) {
       productFallbackUrl = `https://www.wildberries.ru/catalog/0/search.aspx?search=${encodeURIComponent(productQuery)}`;
     } else if (marketplaceSlug === "yandex") {
       productFallbackUrl = `https://market.yandex.ru/search?text=${encodeURIComponent(productQuery)}`;
+    }
+  } else {
+    if (marketplaceSlug === "ozon") {
+      productFallbackUrl = "https://www.ozon.ru/";
+    } else if (marketplaceSlug === "wb") {
+      productFallbackUrl = "https://www.wildberries.ru/";
+    } else if (marketplaceSlug === "yandex") {
+      productFallbackUrl = "https://market.yandex.ru/";
     }
   }
   const productOpenUrl = productUrl || productFallbackUrl;
